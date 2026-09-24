@@ -1,0 +1,137 @@
+"""External tools (ffmpeg, ffprobe, AOM noise_model) and cancellable process runs."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+import os
+import shutil
+import subprocess
+import threading
+
+_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+
+class Cancelled(Exception):
+    """Raised when the user cancels a running job."""
+
+
+class ToolError(RuntimeError):
+    pass
+
+
+class CancelToken:
+    """Shared between a job and the GUI; cancelling kills running child processes."""
+
+    def __init__(self) -> None:
+        self._event = threading.Event()
+        self._lock = threading.Lock()
+        self._processes: set[subprocess.Popen] = set()
+
+    @property
+    def cancelled(self) -> bool:
+        return self._event.is_set()
+
+    def cancel(self) -> None:
+        self._event.set()
+        with self._lock:
+            for process in list(self._processes):
+                try:
+                    process.kill()
+                except OSError:
+                    pass
+
+    def check(self) -> None:
+        if self._event.is_set():
+            raise Cancelled()
+
+    def _track(self, process: subprocess.Popen) -> None:
+        with self._lock:
+            self._processes.add(process)
+        if self._event.is_set():
+            process.kill()
+
+    def _untrack(self, process: subprocess.Popen) -> None:
+        with self._lock:
+            self._processes.discard(process)
+
+
+def run(command: list[str], cancel: CancelToken | None = None, *,
+        stdin: bytes | None = None) -> bytes:
+    """Run a command and return its stdout; raise ToolError with stderr on failure."""
+    if cancel:
+        cancel.check()
+    try:
+        process = subprocess.Popen(
+            command, stdin=subprocess.PIPE if stdin is not None else subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=_NO_WINDOW)
+    except FileNotFoundError as exc:
+        raise ToolError(f"Program not found: {command[0]}") from exc
+    if cancel:
+        cancel._track(process)
+    try:
+        out, err = process.communicate(stdin)
+    finally:
+        if cancel:
+            cancel._untrack(process)
+    if cancel and cancel.cancelled:
+        raise Cancelled()
+    if process.returncode != 0:
+        message = err.decode("utf-8", "replace").strip()
+        tail = "\n".join(message.splitlines()[-12:])
+        raise ToolError(f"{Path(command[0]).name} failed (exit code {process.returncode}):\n{tail}")
+    return out
+
+
+def run_text(command: list[str], cancel: CancelToken | None = None) -> str:
+    return run(command, cancel).decode("utf-8", "replace")
+
+
+@dataclass
+class Tools:
+    ffmpeg: str = ""
+    ffprobe: str = ""
+    noise_model: str = ""
+    mkvmerge: str = ""
+
+    LABELS = {"ffmpeg": "ffmpeg", "ffprobe": "ffprobe", "noise_model": "AOM noise_model",
+              "mkvmerge": "mkvmerge (MKVToolNix)"}
+
+    def missing(self, *names: str) -> list[str]:
+        names = names or tuple(self.LABELS)
+        return [self.LABELS[n] for n in names
+                if not getattr(self, n) or not Path(getattr(self, n)).is_file()]
+
+
+def _candidate_noise_models() -> list[Path]:
+    here = Path(__file__).resolve()
+    roots = [here.parents[1], *here.parents[2:5]]
+    names = ("noise_model.exe", "noise_model")
+    found = []
+    for root in roots:
+        for name in names:
+            found += [root / name, root / "tools" / name, root / "work" / "afgs1-qa" / "aom-build" / name]
+    return found
+
+
+def detect_tools() -> Tools:
+    """Best-effort discovery from PATH and a few conventional locations."""
+    tools = Tools(shutil.which("ffmpeg") or "", shutil.which("ffprobe") or "",
+                  shutil.which("noise_model") or "", shutil.which("mkvmerge") or "")
+    if not tools.noise_model:
+        for candidate in _candidate_noise_models():
+            if candidate.is_file():
+                tools.noise_model = str(candidate)
+                break
+    if not tools.mkvmerge:
+        for root in (os.environ.get("ProgramFiles", r"C:\Program Files"),
+                     os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")):
+            candidate = Path(root) / "MKVToolNix" / "mkvmerge.exe"
+            if candidate.is_file():
+                tools.mkvmerge = str(candidate)
+                break
+    return tools
+
+
+def cpu_count() -> int:
+    return os.cpu_count() or 4
