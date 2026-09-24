@@ -109,14 +109,25 @@ def split_planes(buffer: bytes | np.ndarray, geometry: Geometry) -> tuple[np.nda
     return y, u, v
 
 
+def read_frames(ffmpeg: str, info: VideoInfo, index: int, count: int,
+                cancel: CancelToken | None = None, target: Geometry | None = None,
+                crop: Crop | None = None) -> list[Frame]:
+    """Decode ``count`` consecutive frames starting at ``index`` (one seek)."""
+    target = target or Geometry.of(info)
+    data = run(_command(ffmpeg, info, index, count, target, crop, "pipe:1"), cancel)
+    n = len(data) // target.frame_bytes
+    if n == 0:
+        raise RuntimeError(f"{info.path.name}: frame {index} could not be decoded")
+    frames = []
+    for k in range(n):
+        y, u, v = split_planes(data[k * target.frame_bytes:(k + 1) * target.frame_bytes], target)
+        frames.append(Frame(index + k, y.copy(), u.copy(), v.copy(), target))
+    return frames
+
+
 def read_frame(ffmpeg: str, info: VideoInfo, index: int, cancel: CancelToken | None = None,
                target: Geometry | None = None, crop: Crop | None = None) -> Frame:
-    target = target or Geometry.of(info)
-    data = run(_command(ffmpeg, info, index, 1, target, crop, "pipe:1"), cancel)
-    if len(data) < target.frame_bytes:
-        raise RuntimeError(f"{info.path.name}: frame {index} could not be decoded")
-    y, u, v = split_planes(data[:target.frame_bytes], target)
-    return Frame(index, y.copy(), u.copy(), v.copy(), target)
+    return read_frames(ffmpeg, info, index, 1, cancel, target, crop)[0]
 
 
 def extract_raw(ffmpeg: str, info: VideoInfo, index: int, count: int, output: Path,

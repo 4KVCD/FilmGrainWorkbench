@@ -14,7 +14,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from fractions import Fraction
 from pathlib import Path
 import json
@@ -26,7 +26,8 @@ from .grain_params import GrainParams
 from .mkvwriter import MatroskaVideoWriter
 from .probe import VideoInfo
 from .tools import CancelToken, ToolError, Tools, run, run_text
-from .vvc import insert_t35, length_size_from_vvcc
+from .vvc import (SEI_CONTENT_LIGHT_LEVEL, SEI_MASTERING_DISPLAY, insert_t35,
+                  length_size_from_vvcc, prefix_sei_types)
 
 
 @dataclass
@@ -34,6 +35,7 @@ class WriteReport:
     output: Path
     pictures: int
     packets: int
+    notes: list[str] = field(default_factory=list)
 
 
 def picture_format(info: VideoInfo) -> PictureFormat:
@@ -72,8 +74,17 @@ _TRACK_OPTIONS = {
 }
 
 
+# Track-header copies of HDR10 static metadata. When the VVC stream carries the
+# same data in SEI messages, these are left out: ffmpeg 9.0.1 fails with
+# "File exists" (-17) whenever it applies film grain to a stream whose MKV
+# track header has mastering-display or content-light-level metadata.
+_MASTERING_KEYS = ("chromaticity_coordinates", "white_color_coordinates",
+                   "max_luminance", "min_luminance")
+_LIGHT_LEVEL_KEYS = ("max_content_light", "max_frame_light")
+
+
 def _merge_with_mkvmerge(mkvmerge: str, video: Path, original: Path, output: Path,
-                         cancel: CancelToken) -> None:
+                         cancel: CancelToken, skip: tuple[str, ...] = ()) -> None:
     """Our VVC track first, then every other track, chapter, tag and attachment.
 
     ffmpeg cannot be used here: its Matroska demuxer does not rebuild decode
@@ -90,7 +101,7 @@ def _merge_with_mkvmerge(mkvmerge: str, video: Path, original: Path, output: Pat
     options: list[str] = []
     for key, flag in _TRACK_OPTIONS.items():
         value = main.get("properties", {}).get(key)
-        if value is None or value == "":
+        if value is None or value == "" or key in skip:
             continue
         if isinstance(value, bool):
             value = int(value)
@@ -126,6 +137,7 @@ def write_afgs1_mkv(tools: Tools, encoded: VideoInfo, output: str | Path, params
     with tempfile.TemporaryDirectory(prefix="afgs1wb-mux-", dir=output.parent) as tmp:
         video_path = Path(tmp) / "video.mkv"
         pictures = packets = 0
+        sei_types: set[int] = set()
         with av.open(str(encoded.path)) as container:
             stream = container.streams[encoded.stream_index]
             length_size = length_size_from_vvcc(stream.codec_context.extradata)
@@ -142,6 +154,8 @@ def write_afgs1_mkv(tools: Tools, encoded: VideoInfo, output: str | Path, params
                         raise RuntimeError(f"packet {packets} of the VVC stream has no timestamp")
                     seconds = float(packet.pts * time_base)
                     index = int(round((seconds - encoded.first_pts) * fps))
+                    if packets < 64:
+                        sei_types |= prefix_sei_types(bytes(packet), length_size)
                     data, is_picture = insert_t35(bytes(packet), length_size,
                                                   template.for_seed(picture_seed(base_seed, index)))
                     pictures += is_picture
@@ -159,7 +173,17 @@ def write_afgs1_mkv(tools: Tools, encoded: VideoInfo, output: str | Path, params
 
         progress(0.9, "Merging audio, subtitles and chapters from the encode…")
         merged = Path(tmp) / "merged.mkv"
-        _merge_with_mkvmerge(tools.mkvmerge, video_path, encoded.path, merged, cancel)
+        skip: tuple[str, ...] = ()
+        notes = []
+        if SEI_MASTERING_DISPLAY in sei_types:
+            skip += _MASTERING_KEYS
+        if SEI_CONTENT_LIGHT_LEVEL in sei_types:
+            skip += _LIGHT_LEVEL_KEYS
+        if skip:
+            notes.append("HDR10 mastering / light-level metadata is kept in the video stream's SEI "
+                         "and not repeated in the MKV track header (ffmpeg 9 cannot apply grain "
+                         "when it is there).")
+        _merge_with_mkvmerge(tools.mkvmerge, video_path, encoded.path, merged, cancel, skip)
 
         progress(0.95, "Checking the written file…")
         written = _count_packets(merged, 0, tools.ffprobe, cancel)
@@ -173,4 +197,4 @@ def write_afgs1_mkv(tools: Tools, encoded: VideoInfo, output: str | Path, params
                                f"input (first ones: {before[:6]} vs {after[:6]})")
         os.replace(merged, output)
     progress(1.0, "Done")
-    return WriteReport(output, pictures, packets)
+    return WriteReport(output, pictures, packets, notes)

@@ -83,7 +83,9 @@ class GrainModel:
             "cb_sigma": self.cb_sigma.round(4).tolist(),
             "cr_sigma": self.cr_sigma.round(4).tolist(),
             "runs": [{"start": r.start, "frames": r.frames, "psnr": round(r.psnr, 2),
-                      "alignment": r.alignment} for r in self.runs],
+                      "alignment": r.alignment,
+                      "luma_sigma": None if r.luma_sigma is None else r.luma_sigma.round(3).tolist()}
+                     for r in self.runs],
         }, indent=1)
 
     @classmethod
@@ -93,7 +95,9 @@ class GrainModel:
         if d.get("version") != 1:
             raise ValueError("unsupported grain model file")
         base = parse_grain_table(d["base_table"])[0].params
-        runs = [RunResult(r["start"], r["frames"], r["psnr"], r["alignment"]) for r in d["runs"]]
+        runs = [RunResult(r["start"], r["frames"], r["psnr"], r["alignment"],
+                          luma_sigma=None if r.get("luma_sigma") is None else np.array(r["luma_sigma"]))
+                for r in d["runs"]]
         return cls(base, d["bit_depth"], *d["subsampling"], np.array(d["luma_sigma"]),
                    np.array(d["cb_sigma"]), np.array(d["cr_sigma"]), runs)
 

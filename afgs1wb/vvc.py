@@ -151,6 +151,18 @@ def insert_t35(packet: bytes, length_size: int, t35_payload: bytes) -> tuple[byt
     return join_nals(cleaned, length_size), True
 
 
+SEI_MASTERING_DISPLAY = 137
+SEI_CONTENT_LIGHT_LEVEL = 144
+
+
+def prefix_sei_types(packet: bytes, length_size: int) -> set[int]:
+    types: set[int] = set()
+    for nal in split_nals(packet, length_size):
+        if nal_type(nal) == NAL_PREFIX_SEI:
+            types.update(t for t, _ in parse_sei_messages(nal) or [])
+    return types
+
+
 def find_t35(packet: bytes, length_size: int) -> list[bytes]:
     """Return every AFGS1 T.35 payload found in the packet's prefix SEI NALs."""
     found = []
