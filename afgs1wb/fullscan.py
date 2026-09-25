@@ -33,7 +33,7 @@ import time
 import numpy as np
 
 from . import synth
-from .analysis import check_alignment
+from .alignment import check_alignment
 from .frames import Crop, Frame, Geometry, _filters, read_frames, seek_args
 from .grain_params import GrainParams, TableEntry, format_grain_table, parse_grain_table
 from .probe import VideoInfo
@@ -55,10 +55,7 @@ class Segment:
 
 @dataclass
 class TimelineModel:
-    """Grain parameters that change over the video, one segment at a time.
-
-    A Quick-sample analysis is the same thing with a single segment.
-    """
+    """Grain parameters that change over the video, one segment at a time."""
     segments: list[Segment]
     bit_depth: int
     subsampling_x: int
@@ -66,11 +63,11 @@ class TimelineModel:
     fps: Fraction
     frames: int
     seconds: float = 0.0
-    kind: str = "every-frame"                 # or "quick"
+    kind: str = "every-frame"
     sigma_frames: list[int] = field(default_factory=list)    # grain-over-time samples
     sigma_values: list[float] = field(default_factory=list)  # luma sigma at mid-grey, sample units
     alignment: list[str] = field(default_factory=list)
-    notes: dict = field(default_factory=dict)  # mode-specific extras (quick runs etc.)
+    notes: dict = field(default_factory=dict)  # "warnings" from the run
 
     def __post_init__(self) -> None:
         self.segments.sort(key=lambda s: s.start)
@@ -395,17 +392,6 @@ def analyze_every_frame(tools: Tools, source: VideoInfo, encoded: VideoInfo, off
                           encoded.fps, encoded.frame_count, time.perf_counter() - started,
                           "every-frame", alignment=alignment, notes={"warnings": warnings})
     sample_sigmas(model, cancel)
-    return model
-
-
-def quick_timeline(params: GrainParams, encoded: VideoInfo, seconds: float, notes: dict) -> TimelineModel:
-    """A Quick-sample result as a one-segment timeline."""
-    g = Geometry.of(encoded)
-    model = TimelineModel([Segment(0, encoded.frame_count, params)], g.bit_depth, g.subsampling_x,
-                          g.subsampling_y, encoded.fps, encoded.frame_count, seconds, "quick",
-                          notes=notes)
-    sigma = _segment_sigma(params, g.bit_depth)
-    model.sigma_frames, model.sigma_values = [0, encoded.frame_count - 1], [sigma, sigma]
     return model
 
 

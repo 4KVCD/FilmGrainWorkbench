@@ -12,11 +12,9 @@ from ..tools import Tools, detect_tools
 PURPOSE = {
     "ffmpeg": "decodes frames",
     "ffprobe": "reads video properties",
-    "noise_model": "estimates the grain (libaom example program)",
     "mkvmerge": "writes the output MKV (MKVToolNix)",
 }
 WHERE = {
-    "noise_model": "Build libaom with -DENABLE_EXAMPLES=ON; it is in the build's output folder.",
     "mkvmerge": "Install MKVToolNix from mkvtoolnix.download.",
     "ffmpeg": "Any recent build with VVC decoding (e.g. gyan.dev full build).",
     "ffprobe": "Comes with ffmpeg.",

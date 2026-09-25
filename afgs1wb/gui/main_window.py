@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QFileDialog, QFormLayout
 
 from .. import display, synth
 from ..afgs1 import picture_seed
-from ..analysis import detect_offset, entry_sigmas
+from ..alignment import detect_offset
 from ..fullscan import (TimelineModel, analyze_every_frame, analyzer_path, cache_key,
                         checkpoint_frame, default_threads, estimate_frame, estimate_seconds)
 from ..frames import Crop, Frame, Geometry, read_frame, read_frames, source_crop_for
@@ -30,7 +30,8 @@ from ..mux import WriteReport, write_afgs1_mkv
 from ..probe import VideoInfo, probe
 from ..tools import Tools, ToolError, detect_tools, keep_awake
 from ..grain_params import GrainParams
-from ..tuning import FramePlan, GrainPlan, TimelinePlan, Tuning, scale_params, sigma_in_8bit_units
+from ..tuning import (FramePlan, GrainPlan, TimelinePlan, Tuning, entry_sigmas, scale_params,
+                      sigma_in_8bit_units)
 from .curves import CurvePlot
 from .jobs import Job
 from .timeline import GrainTimeline

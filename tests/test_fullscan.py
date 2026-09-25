@@ -8,12 +8,11 @@ import pytest
 import afgs1wb.fullscan as fullscan
 from afgs1wb import synth
 from afgs1wb.afgs1 import picture_seed
-from afgs1wb.analysis import entry_sigmas
 from afgs1wb.frames import Geometry, split_planes
 from afgs1wb.mux import write_afgs1_mkv
 from afgs1wb.probe import probe
 from afgs1wb.tools import Cancelled, CancelToken
-from afgs1wb.tuning import TimelinePlan, Tuning, scale_params
+from afgs1wb.tuning import TimelinePlan, Tuning, entry_sigmas, scale_params
 
 from conftest import sample_params
 

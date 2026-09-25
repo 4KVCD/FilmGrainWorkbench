@@ -296,30 +296,6 @@ def apply_grain(y: np.ndarray, u: np.ndarray | None, v: np.ndarray | None,
     return out_y, out_u, out_v
 
 
-def approx_luma_template_std(p: GrainParams, bit_depth: int) -> float:
-    """Fast analytical estimate of :func:`luma_template_std`.
-
-    The AR filter is causal, so its white-noise power gain is the mean of
-    1/|1 - A(w)|^2 over frequency. Rounding and clipping are ignored, which
-    makes this a few percent off - fine for plotting thousands of segments.
-    """
-    lag = p.ar_coeff_lag
-    base = 512.0 / (1 << (12 - bit_depth + p.grain_scale_shift))
-    if lag == 0 or not p.ar_coeffs_y:
-        return base
-    kernel = np.zeros((64, 64))
-    pos = 0
-    for dr in range(-lag, 1):
-        for dc in range(-lag, lag + 1):
-            if dr == 0 and dc == 0:
-                break
-            kernel[dr % 64, dc % 64] = p.ar_coeffs_y[pos] / (1 << p.ar_coeff_shift)
-            pos += 1
-    response = np.abs(1 - np.fft.fft2(kernel)) ** 2
-    gain = float(np.mean(1 / np.maximum(response, 1e-3)))
-    return base * min(gain, 64.0) ** 0.5
-
-
 def luma_template_std(p: GrainParams, bit_depth: int, seeds: tuple[int, ...] = (1, 7391, 40000)) -> float:
     """Standard deviation of the luma grain template in sample units.
 

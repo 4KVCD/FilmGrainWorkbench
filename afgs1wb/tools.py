@@ -1,4 +1,4 @@
-"""External tools (ffmpeg, ffprobe, AOM noise_model) and cancellable process runs."""
+"""External tools (ffmpeg, ffprobe, mkvmerge) and cancellable process runs."""
 
 from __future__ import annotations
 
@@ -98,11 +98,9 @@ def run_text(command: list[str], cancel: CancelToken | None = None) -> str:
 class Tools:
     ffmpeg: str = ""
     ffprobe: str = ""
-    noise_model: str = ""
     mkvmerge: str = ""
 
-    LABELS = {"ffmpeg": "ffmpeg", "ffprobe": "ffprobe", "noise_model": "AOM noise_model",
-              "mkvmerge": "mkvmerge (MKVToolNix)"}
+    LABELS = {"ffmpeg": "ffmpeg", "ffprobe": "ffprobe", "mkvmerge": "mkvmerge (MKVToolNix)"}
 
     def missing(self, *names: str) -> list[str]:
         names = names or tuple(self.LABELS)
@@ -110,26 +108,10 @@ class Tools:
                 if not getattr(self, n) or not Path(getattr(self, n)).is_file()]
 
 
-def _candidate_noise_models() -> list[Path]:
-    here = Path(__file__).resolve()
-    roots = [here.parents[1], *here.parents[2:5]]
-    names = ("noise_model.exe", "noise_model")
-    found = []
-    for root in roots:
-        for name in names:
-            found += [root / name, root / "tools" / name, root / "work" / "afgs1-qa" / "aom-build" / name]
-    return found
-
-
 def detect_tools() -> Tools:
     """Best-effort discovery from PATH and a few conventional locations."""
     tools = Tools(shutil.which("ffmpeg") or "", shutil.which("ffprobe") or "",
-                  shutil.which("noise_model") or "", shutil.which("mkvmerge") or "")
-    if not tools.noise_model:
-        for candidate in _candidate_noise_models():
-            if candidate.is_file():
-                tools.noise_model = str(candidate)
-                break
+                  shutil.which("mkvmerge") or "")
     if not tools.mkvmerge:
         for root in (os.environ.get("ProgramFiles", r"C:\Program Files"),
                      os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")):

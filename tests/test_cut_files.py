@@ -95,3 +95,10 @@ def test_every_frame_analysis_of_a_cut_pairs_frames_by_time(tools, long_pair, tm
                     "--chroma", "420", "--start-frame", str(decodable), "--output", str(reference),
                     "--reference"], input=stacked, capture_output=True, check=True)
     assert (tmp_path / "run" / "table.tbl").read_bytes() == reference.read_bytes()
+
+
+def test_detect_offset_finds_where_the_cut_starts(tools, long_pair):
+    from afgs1wb.alignment import detect_offset
+    source, cut = long_pair
+    offset, confidence = detect_offset(tools, source, cut, None, CancelToken())
+    assert offset == CUT_OFFSET and confidence > 0.5

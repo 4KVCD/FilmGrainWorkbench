@@ -6,29 +6,29 @@ ITU-T T.35 SEI messages) so the decoder re-synthesises it at playback.
 
 ## How it works
 
-1. **Analyse.** AOM's reference estimator (`noise_model` from libaom) models the
-   grain the encode removed by comparing it with the source. Two modes:
-   - **Quick sample** (about a minute): short runs of frames from 16 places,
-     merged into one grain model for the whole video.
-   - **Every frame** (hours for a 4K film): every frame is analysed, as libaom's
-     encoder does with `--denoise-noise-level`; a new parameter segment starts
-     whenever the noise changes, so the grain follows the film shot by shot.
-     Frames stream from ffmpeg into `noise_model` through named pipes (no
-     temporary files) in parallel chunks; finished chunks are kept, so an
-     interrupted run resumes. The PC is kept awake while it runs.
+The grain is measured with libaom's own noise model (`aom_dsp/noise_model.c`,
+built into `bin/afgs1_grain_analyzer.exe` by `analyzer/build.py`), comparing
+each source frame with the same encoded frame.
 
-   Frame alignment is checked throughout; a wrong offset stops every-frame
-   analysis within seconds.
-2. **Tune.** The model is shown as grain strength (σ) against brightness (and,
-   in every-frame mode, as a strip of grain strength over the whole film under
-   the viewer; click it to jump there).
-   Luma and chroma strength scale it exactly; the frame viewer shows the
-   result on any frame, rendered with the same algorithm decoders use.
-3. **Write.** Every picture of the encode gets a complete AFGS1 parameter set
-   with its own seed. Audio, subtitles, chapters, attachments and HDR
-   properties are carried over.
+1. **Videos.** Choose the source and the VVC encode. *Detect* finds the frame
+   offset if the encode was trimmed.
+2. **Preview and tune.** The viewer estimates the grain of the frame shown as
+   it loads, and again for every frame you move to. Luma and chroma strength
+   scale it exactly; the grain is rendered with the same algorithm decoders use.
+3. **Write.** Every frame is analysed the way libaom's encoder does with
+   `--denoise-noise-level`: one model carried through the film, updated on each
+   frame and restarted when the noise changes, so the grain follows the film
+   shot by shot. Source and encode are decoded once, in order, by one ffmpeg
+   process and paired by timestamp; the model work runs on all CPU threads.
+   Progress is saved about once a minute, so a stopped run resumes, and a
+   finished analysis is reused. Then every picture of the encode gets a
+   complete AFGS1 parameter set with its own seed (libaom's: 7391, +3381 per
+   frame). Audio, subtitles, chapters, attachments and HDR properties are
+   carried over. After writing, the viewer shows the written parameters.
 4. **Verify.** ffmpeg decodes a frame of the written file; the app checks it is
    bit-identical to the preview.
+
+Grain flags default to libaom's: overlap on, no clipping to the limited range.
 
 ## Requirements
 
@@ -36,11 +36,12 @@ ITU-T T.35 SEI messages) so the decoder re-synthesises it at playback.
 - `pip install -r requirements.txt` (PySide6, PyAV, NumPy)
 - **ffmpeg / ffprobe** with VVC decoding. FFmpeg 7.1 or newer applies AFGS1
   grain when decoding VVC.
-- **noise_model** from libaom, built with `-DENABLE_EXAMPLES=ON`.
 - **mkvmerge** from [MKVToolNix](https://mkvtoolnix.download/).
+- The grain analyzer: `python analyzer/build.py` (needs gcc, cmake and ninja;
+  it fetches libaom).
 
-The app looks for these on `PATH` and in the usual install folders; set them
-under *Settings → External programs* otherwise.
+The app looks for ffmpeg, ffprobe and mkvmerge on `PATH` and in the usual
+install folders; set them under *Settings → External programs* otherwise.
 
 ## Run
 
