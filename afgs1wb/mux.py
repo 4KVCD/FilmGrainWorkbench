@@ -121,16 +121,28 @@ def _merge_with_mkvmerge(mkvmerge: str, video: Path, original: Path, output: Pat
             raise
 
 
-def write_afgs1_mkv(tools: Tools, encoded: VideoInfo, output: str | Path, params: GrainParams,
-                    base_seed: int, progress, cancel: CancelToken) -> WriteReport:
+def write_afgs1_mkv(tools: Tools, encoded: VideoInfo, output: str | Path,
+                    params: "GrainParams | GrainPlan", base_seed: int, progress,
+                    cancel: CancelToken) -> WriteReport:
+    """``params`` is one parameter set for every picture, or a per-frame GrainPlan."""
     import av
+    from .tuning import GrainPlan, StaticPlan
 
     output = Path(output)
     if output.suffix.lower() != ".mkv":
         raise ValueError("the output must be a .mkv file")
     if output.resolve() == encoded.path.resolve():
         raise ValueError("the output must not overwrite the encoded input")
-    template = T35Template(params, picture_format(encoded))
+    plan = params if isinstance(params, GrainPlan) else StaticPlan(params)
+    fmt = picture_format(encoded)
+    templates: dict[int, T35Template] = {}
+
+    def template_for(index: int) -> T35Template:
+        chosen = plan.params_at(index)
+        key = id(chosen)
+        if key not in templates:
+            templates[key] = T35Template(chosen, fmt)
+        return templates[key]
     fps = float(encoded.fps)
     output.parent.mkdir(parents=True, exist_ok=True)
 
@@ -156,8 +168,8 @@ def write_afgs1_mkv(tools: Tools, encoded: VideoInfo, output: str | Path, params
                     index = int(round((seconds - encoded.first_pts) * fps))
                     if packets < 64:
                         sei_types |= prefix_sei_types(bytes(packet), length_size)
-                    data, is_picture = insert_t35(bytes(packet), length_size,
-                                                  template.for_seed(picture_seed(base_seed, index)))
+                    data, is_picture = insert_t35(bytes(packet), length_size, template_for(
+                        max(0, index)).for_seed(picture_seed(base_seed, index)))
                     pictures += is_picture
                     duration = int(round(float(packet.duration * time_base) * 1000)) if packet.duration else 0
                     writer.write(data, int(round(seconds * 1000)), packet.is_keyframe, duration)

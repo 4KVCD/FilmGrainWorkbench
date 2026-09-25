@@ -33,7 +33,7 @@ def test_full_workflow(qapp, tools, need, grainy_source, grainy_clip, tmp_path):
     from afgs1wb.gui.viewer import ENCODED, GRAIN, SOURCE
 
     settings = QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat)
-    w = MainWindow(settings)
+    w = MainWindow(settings, tmp_path / "data")
     w.show()
     idle = lambda: not (w.frame_job and w.frame_job.isRunning()) and not w.frame_timer.isActive()
 
@@ -72,3 +72,48 @@ def test_full_workflow(qapp, tools, need, grainy_source, grainy_clip, tmp_path):
     w._verify()
     wait_for(qapp, lambda: not w._busy() and "matches the preview exactly" in w.write_label.text())
     w.close()
+
+
+def test_every_frame_workflow(qapp, tools, need, grainy_source, grainy_clip, tmp_path, monkeypatch):
+    need("ffmpeg", "ffprobe", "noise_model", "mkvmerge")
+    import afgs1wb.fullscan as fullscan
+    from afgs1wb.gui.main_window import MainWindow
+    from afgs1wb.gui.viewer import GRAIN
+
+    monkeypatch.setattr(fullscan, "CHUNK_FRAMES", 20)
+    settings = QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat)
+    w = MainWindow(settings, tmp_path / "data")
+    w.show()
+    idle = lambda: not (w.frame_job and w.frame_job.isRunning()) and not w.frame_timer.isActive()
+    w.source_edit.setText(str(grainy_source))
+    w._load_video("source")
+    w.encoded_edit.setText(str(grainy_clip))
+    w._load_video("encoded")
+    wait_for(qapp, idle)
+
+    w.full_radio.setChecked(True)
+    assert w.full_options.isVisibleTo(w) and not w.quick_options.isVisibleTo(w)
+    assert w.analyse_button.text() == "Analyse every frame"
+    w.gpu_check.setChecked(False)
+    w._analyse()
+    wait_for(qapp, lambda: not w._busy() and w.model is not None)
+    wait_for(qapp, lambda: idle() and GRAIN in w.state.images)
+    assert "Every frame analysed" in w.analysis_label.text()
+    assert w.grain_timeline.isVisibleTo(w)
+    assert "This shot" in w.tune_label.text()
+
+    w.grain_timeline.frame_clicked.emit(30)
+    wait_for(qapp, lambda: idle() and w.current_index == 30)
+
+    w.output_edit.setText(str(tmp_path / "every.mkv"))
+    w._write()
+    wait_for(qapp, lambda: not w._busy() and w.written is not None)
+    w._verify()
+    wait_for(qapp, lambda: not w._busy() and "matches the preview exactly" in w.write_label.text())
+
+    # reopening the same files restores the every-frame model
+    w.close()
+    w2 = MainWindow(settings, tmp_path / "data")
+    wait_for(qapp, lambda: w2.model is not None, timeout=30)
+    assert "previous every-frame analysis" in w2.analysis_label.text()
+    w2.close()

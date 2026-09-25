@@ -9,6 +9,7 @@ is vectorised with NumPy; every rounding and clipping step is the spec's.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
 
 import numpy as np
 
@@ -42,6 +43,14 @@ class _Lfsr:
         idx = np.fromiter((self.get(11) for _ in range(height * width)),
                           dtype=np.int32, count=height * width)
         return _GAUSS[idx].reshape(height, width)
+
+
+@lru_cache(maxsize=256)
+def _white_noise(seed: int, height: int, width: int) -> np.ndarray:
+    """The first height*width Gaussian draws for ``seed`` (read-only, cached)."""
+    block = _Lfsr(seed).gaussian_block(height, width)
+    block.setflags(write=False)
+    return block
 
 
 @dataclass
@@ -95,9 +104,8 @@ def generate_grain(p: GrainParams, seed: int, bit_depth: int,
     ar_shift = p.ar_coeff_shift
     lag = p.ar_coeff_lag
 
-    rng = _Lfsr(seed)
     if p.y_points:
-        luma = _round2(rng.gaussian_block(LUMA_H, LUMA_W), shift).astype(np.int32)
+        luma = _round2(_white_noise(seed & 0xFFFF, LUMA_H, LUMA_W), shift).astype(np.int32)
         _ar_filter(luma, list(p.ar_coeffs_y), lag, ar_shift, gmin, gmax, None)
     else:
         luma = np.zeros((LUMA_H, LUMA_W), dtype=np.int32)
@@ -120,7 +128,7 @@ def generate_grain(p: GrainParams, seed: int, bit_depth: int,
     for xor, points, coeffs in ((0xB524, p.cb_points, p.ar_coeffs_cb),
                                 (0x49D8, p.cr_points, p.ar_coeffs_cr)):
         if points or p.chroma_scaling_from_luma:
-            g = _round2(_Lfsr(seed ^ xor).gaussian_block(ch, cw), shift).astype(np.int32)
+            g = _round2(_white_noise((seed ^ xor) & 0xFFFF, ch, cw), shift).astype(np.int32)
             c = list(coeffs) + [0] * (n_chroma - len(coeffs))
             _ar_filter(g, c, lag, ar_shift, gmin, gmax, luma_term)
         else:
@@ -286,6 +294,30 @@ def apply_grain(y: np.ndarray, u: np.ndarray | None, v: np.ndarray | None,
         n = _round2(luma_lut[y32] * noise[0][:h, :w], shift)
         out_y = np.clip(y32 + n, min_value, max_luma).astype(y.dtype)
     return out_y, out_u, out_v
+
+
+def approx_luma_template_std(p: GrainParams, bit_depth: int) -> float:
+    """Fast analytical estimate of :func:`luma_template_std`.
+
+    The AR filter is causal, so its white-noise power gain is the mean of
+    1/|1 - A(w)|^2 over frequency. Rounding and clipping are ignored, which
+    makes this a few percent off - fine for plotting thousands of segments.
+    """
+    lag = p.ar_coeff_lag
+    base = 512.0 / (1 << (12 - bit_depth + p.grain_scale_shift))
+    if lag == 0 or not p.ar_coeffs_y:
+        return base
+    kernel = np.zeros((64, 64))
+    pos = 0
+    for dr in range(-lag, 1):
+        for dc in range(-lag, lag + 1):
+            if dr == 0 and dc == 0:
+                break
+            kernel[dr % 64, dc % 64] = p.ar_coeffs_y[pos] / (1 << p.ar_coeff_shift)
+            pos += 1
+    response = np.abs(1 - np.fft.fft2(kernel)) ** 2
+    gain = float(np.mean(1 / np.maximum(response, 1e-3)))
+    return base * min(gain, 64.0) ** 0.5
 
 
 def luma_template_std(p: GrainParams, bit_depth: int, seeds: tuple[int, ...] = (1, 7391, 40000)) -> float:

@@ -130,16 +130,24 @@ def _psnr(a: np.ndarray, b: np.ndarray, peak: float) -> float:
     return 99.0 if mse <= 1e-9 else 10 * math.log10(peak * peak / mse)
 
 
-def check_alignment(src: np.ndarray, enc: np.ndarray, peak: float) -> tuple[float, str]:
-    """Return (mean matched PSNR, verdict) for a run of luma planes."""
+def check_alignment(src: np.ndarray, enc: np.ndarray, peak: float,
+                    max_shift: int = 3) -> tuple[float, str]:
+    """Return (mean matched PSNR, verdict) for a run of luma planes.
+
+    Compares each source frame with the encoded frame shifted by -max_shift..
+    +max_shift. "shifted" means some non-zero shift matches clearly better.
+    """
+    n = len(src)
     matched = [_psnr(s, e, peak) for s, e in zip(src, enc)]
     mean = float(np.mean(matched))
-    if len(src) < 3:
+    if n < 3:
         return mean, "unclear"
-    earlier = float(np.mean([_psnr(src[i], enc[i + 1], peak) for i in range(len(src) - 1)]))
-    later = float(np.mean([_psnr(src[i + 1], enc[i], peak) for i in range(len(src) - 1)]))
-    same = float(np.mean(matched[:-1]))
-    best_shift = max(earlier, later)
+    scores = {}
+    for shift in range(-min(max_shift, n - 2), min(max_shift, n - 2) + 1):
+        pairs = [(i, i + shift) for i in range(n) if 0 <= i + shift < n]
+        scores[shift] = float(np.mean([_psnr(src[i], enc[j], peak) for i, j in pairs]))
+    same = scores.pop(0)
+    best_shift = max(scores.values())
     if best_shift > same + 0.5:
         return mean, "shifted"
     if same > best_shift + 0.5:
