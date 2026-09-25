@@ -22,8 +22,8 @@ from .grain_params import MAX_UV_POINTS, MAX_Y_POINTS, GrainParams
 class Tuning:
     luma_strength: float = 1.0
     chroma_strength: float = 1.0
-    overlap: bool = True
-    clip_to_restricted_range: bool = True
+    overlap: bool = True                       # libaom's noise model: overlap_flag = 1
+    clip_to_restricted_range: bool = False     # ...and clip_to_restricted_range = 0
     seed: int = 7391
 
 

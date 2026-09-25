@@ -47,6 +47,9 @@ def test_full_workflow(qapp, tools, need, grainy_source, grainy_clip, tmp_path):
     # The grain of the frame shown is estimated as it loads: no analysis step.
     wait_for(qapp, lambda: idle() and SOURCE in w.state.images and GRAIN in w.state.images)
     assert w.model is None and w.current_index in w.estimates
+    # grain flags follow libaom's noise model: overlap on, no clipping to the limited range
+    assert w.encoded.limited_range and not w.clip_check.isChecked() and w.overlap_check.isChecked()
+    assert not w.plan.params_at(w.current_index).clip_to_restricted_range
     assert "Estimated from this frame" in w.tune_label.text()
 
     QTest.keyClick(w, Qt.Key.Key_Right)

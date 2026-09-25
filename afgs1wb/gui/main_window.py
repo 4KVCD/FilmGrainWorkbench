@@ -166,13 +166,16 @@ class MainWindow(QMainWindow):
                                   "grain moves; change it only to get a different pattern.")
         self.seed_spin.valueChanged.connect(self._tuning_changed)
         tform.addRow("Seed", self.seed_spin)
-        self.overlap_check = QCheckBox("Blend grain block edges (recommended)")
+        self.overlap_check = QCheckBox("Blend grain block edges (on in libaom)")
         self.overlap_check.setChecked(True)
+        self.overlap_check.setToolTip("overlap_flag: blend the 32×32 grain blocks where they meet. libaom's "
+                                      "noise model always turns it on.")
         self.overlap_check.toggled.connect(self._tuning_changed)
-        self.clip_check = QCheckBox("Keep within limited (TV) range")
-        self.clip_check.setChecked(True)
-        self.clip_check.setToolTip("Clip grained samples to 16–235/240 (scaled to the bit depth). "
-                                   "Set automatically from the encode's range.")
+        self.clip_check = QCheckBox("Clip grained picture to limited (TV) range (off in libaom)")
+        self.clip_check.setChecked(False)
+        self.clip_check.setToolTip("clip_to_restricted_range: clip grained samples to 16–235 (chroma "
+                                   "16–240), scaled to the bit depth. libaom's noise model never sets it, "
+                                   "so grain in the darkest and brightest areas is not cut off.")
         self.clip_check.toggled.connect(self._tuning_changed)
         tform.addRow(self.overlap_check)
         tform.addRow(self.clip_check)
@@ -405,6 +408,7 @@ class MainWindow(QMainWindow):
         self.chroma_spin.setValue(int(s.value("tune/chroma", 100)))
         self.seed_spin.setValue(int(s.value("tune/seed", 7391)))
         self.overlap_check.setChecked(s.value("tune/overlap", "true") in (True, "true"))
+        self.clip_check.setChecked(s.value("tune/clip", "false") in (True, "true"))
         self.workers_spin.setValue(int(s.value("analysis/threads", default_threads())))
         self.gpu_check.setChecked(s.value("analysis/gpu", "true") in (True, "true"))
         self._update_estimate()
@@ -423,6 +427,7 @@ class MainWindow(QMainWindow):
         s.setValue("tune/chroma", self.chroma_spin.value())
         s.setValue("tune/seed", self.seed_spin.value())
         s.setValue("tune/overlap", self.overlap_check.isChecked())
+        s.setValue("tune/clip", self.clip_check.isChecked())
 
     def _startup(self) -> None:
         self._update_tools_banner()
@@ -504,7 +509,6 @@ class MainWindow(QMainWindow):
             self.converter = display.Converter(display.DisplayFormat(
                 enc.bit_depth, enc.limited_range, enc.matrix, enc.transfer, enc.primaries,
                 enc.width, enc.height))
-            self.clip_check.setChecked(enc.limited_range)
             self.frame_spin.setMaximum(enc.frame_count - 1)
             self.timeline.setMaximum(enc.frame_count - 1)
             if not self.output_edit.text() or self._output_is_auto:
