@@ -16,7 +16,7 @@ from PySide6.QtGui import QDesktopServices, QImage, QKeySequence, QShortcut
 from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QFileDialog, QFormLayout,
                                QFrame, QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit,
                                QMainWindow, QMessageBox, QPlainTextEdit, QProgressBar,
-                               QPushButton, QRadioButton, QScrollArea, QSizePolicy, QSlider, QSpinBox,
+                               QPushButton, QScrollArea, QSizePolicy, QSlider, QSpinBox,
                                QSplitter, QToolButton, QVBoxLayout, QWidget)
 
 from .. import display, synth
@@ -138,20 +138,6 @@ class MainWindow(QMainWindow):
         # 2 analyse
         analysis = QGroupBox("2 · Analyse grain")
         form = QFormLayout(analysis)
-        mode_row = QHBoxLayout()
-        self.quick_radio = QRadioButton("Quick sample")
-        self.full_radio = QRadioButton("Every frame")
-        self.quick_radio.setToolTip("Sample a few places and apply one grain setting to the whole video. "
-                                    "About a minute; for previewing, not for the final file.")
-        self.full_radio.setToolTip("Analyse every frame with AOM noise_model, like libaom's encoder: the "
-                                   "grain parameters follow the film shot by shot. Takes hours for a 4K "
-                                   "film; can be stopped and resumed.")
-        self.full_radio.setChecked(True)
-        for radio in (self.quick_radio, self.full_radio):
-            radio.toggled.connect(self._mode_changed)
-            mode_row.addWidget(radio)
-        mode_row.addStretch(1)
-        form.addRow("Mode", mode_row)
         runs_row = QHBoxLayout()
         self.runs_spin = QSpinBox(minimum=2, maximum=64, value=16)
         self.frames_spin = QSpinBox(minimum=3, maximum=24, value=8)
@@ -168,25 +154,6 @@ class MainWindow(QMainWindow):
         self.quick_options.setLayout(runs_row)
         runs_row.setContentsMargins(0, 0, 0, 0)
         form.addRow("Sample", self.quick_options)
-        self.sample_label = form.labelForField(self.quick_options)
-        full_row = QHBoxLayout()
-        full_row.setContentsMargins(0, 0, 0, 0)
-        self.workers_spin = QSpinBox(minimum=1, maximum=128, value=default_threads())
-        self.workers_spin.setToolTip("Threads for the grain analysis. All CPU threads is fastest; use "
-                                     "fewer to keep the PC responsive while it runs.")
-        self.gpu_check = QCheckBox("Decode source on GPU")
-        self.gpu_check.setChecked(True)
-        self.gpu_check.setToolTip("Let ffmpeg decode the source with hardware acceleration (bit-exact) "
-                                  "to leave the CPU to noise_model.")
-        full_row.addWidget(self.workers_spin)
-        full_row.addWidget(QLabel("threads"))
-        full_row.addWidget(self.gpu_check)
-        full_row.addStretch(1)
-        self.full_options = QWidget()
-        self.full_options.setLayout(full_row)
-        form.addRow("Run", self.full_options)
-        self.run_label = form.labelForField(self.full_options)
-        self.workers_spin.valueChanged.connect(self._update_estimate)
         self.estimate_label = QLabel()
         self.estimate_label.setWordWrap(True)
         self.estimate_label.setObjectName("info")
@@ -203,6 +170,8 @@ class MainWindow(QMainWindow):
         form.addRow("Frame offset", offset_row)
         self.analyse_button = QPushButton("Analyse grain")
         self.analyse_button.setProperty("primary", True)
+        self.analyse_button.setToolTip("Sample a few places to preview and tune the grain. Writing the "
+                                       "MKV analyses every frame itself.")
         self.analyse_button.clicked.connect(self._analyse)
         form.addRow(self.analyse_button)
         self.analysis_label = QLabel("Not analysed yet.")
@@ -273,22 +242,42 @@ class MainWindow(QMainWindow):
         wgrid.addWidget(QLabel("Output"), 0, 0)
         wgrid.addWidget(self.output_edit, 0, 1)
         wgrid.addWidget(out_browse, 0, 2)
+        run_row = QHBoxLayout()
+        run_row.setContentsMargins(0, 0, 0, 0)
+        self.workers_spin = QSpinBox(minimum=1, maximum=128, value=default_threads())
+        self.workers_spin.setToolTip("Threads for the every-frame grain analysis. All CPU threads is "
+                                     "fastest; use fewer to keep the PC responsive while it runs.")
+        self.gpu_check = QCheckBox("Decode source on GPU")
+        self.gpu_check.setChecked(True)
+        self.gpu_check.setToolTip("Let ffmpeg decode the source with hardware acceleration (bit-exact) "
+                                  "to leave the CPU to the grain analysis.")
+        run_row.addWidget(self.workers_spin)
+        run_row.addWidget(QLabel("threads"))
+        run_row.addWidget(self.gpu_check)
+        run_row.addStretch(1)
+        wgrid.addWidget(QLabel("Analysis"), 1, 0)
+        wgrid.addLayout(run_row, 1, 1, 1, 2)
+        self.workers_spin.valueChanged.connect(self._update_estimate)
+        self.write_estimate_label = QLabel()
+        self.write_estimate_label.setWordWrap(True)
+        self.write_estimate_label.setObjectName("info")
+        wgrid.addWidget(self.write_estimate_label, 2, 0, 1, 3)
         self.write_button = QPushButton("Write MKV with grain metadata")
         self.write_button.setProperty("primary", True)
         self.write_button.clicked.connect(self._write)
-        wgrid.addWidget(self.write_button, 1, 0, 1, 3)
+        wgrid.addWidget(self.write_button, 3, 0, 1, 3)
         self.verify_button = QPushButton("Verify with ffmpeg")
         self.verify_button.setToolTip("Decode the current frame of the written file with ffmpeg and "
                                       "compare it to the preview.")
         self.verify_button.clicked.connect(self._verify)
         self.open_folder_button = QPushButton("Open folder")
         self.open_folder_button.clicked.connect(self._open_folder)
-        wgrid.addWidget(self.verify_button, 2, 0, 1, 2)
-        wgrid.addWidget(self.open_folder_button, 2, 2)
+        wgrid.addWidget(self.verify_button, 4, 0, 1, 2)
+        wgrid.addWidget(self.open_folder_button, 4, 2)
         self.write_label = QLabel()
         self.write_label.setWordWrap(True)
         self.write_label.setObjectName("info")
-        wgrid.addWidget(self.write_label, 3, 0, 1, 3)
+        wgrid.addWidget(self.write_label, 5, 0, 1, 3)
         side.addWidget(write)
 
         self.log_toggle = QToolButton(text="Activity log", checkable=True)
@@ -452,12 +441,9 @@ class MainWindow(QMainWindow):
         self.chroma_spin.setValue(int(s.value("tune/chroma", 100)))
         self.seed_spin.setValue(int(s.value("tune/seed", 7391)))
         self.overlap_check.setChecked(s.value("tune/overlap", "true") in (True, "true"))
-        # "analysis/mode" held Quick sample as the old default, not as a choice.
-        if s.value("analysis/grain_mode", "every") == "quick":
-            self.quick_radio.setChecked(True)
         self.workers_spin.setValue(int(s.value("analysis/threads", default_threads())))
         self.gpu_check.setChecked(s.value("analysis/gpu", "true") in (True, "true"))
-        self._mode_changed()
+        self._update_estimate()
 
     def _save(self) -> None:
         s = self.settings
@@ -469,7 +455,6 @@ class MainWindow(QMainWindow):
         s.setValue("files/encoded", self.encoded_edit.text())
         s.setValue("analysis/runs", self.runs_spin.value())
         s.setValue("analysis/frames", self.frames_spin.value())
-        s.setValue("analysis/grain_mode", "every" if self.full_radio.isChecked() else "quick")
         s.setValue("analysis/threads", self.workers_spin.value())
         s.setValue("analysis/gpu", self.gpu_check.isChecked())
         s.setValue("tune/luma", self.luma_spin.value())
@@ -600,39 +585,30 @@ class MainWindow(QMainWindow):
         busy = self._busy()
         pair = bool(self.source and self.encoded)
         for w in (self.source_edit, self.encoded_edit, self.runs_spin, self.frames_spin, self.offset_spin,
-                  self.quick_radio, self.full_radio, self.workers_spin, self.gpu_check):
+                  self.workers_spin, self.gpu_check):
             w.setEnabled(not busy)
-        if self.full_radio.isChecked():
-            ready = analyzer_path().is_file()
-            why = "" if ready else "The grain analyzer is not built: run analyzer\\build.py."
-        else:
-            ready = not self.tools.missing("noise_model")
-            why = "" if ready else "Needs AOM noise_model (Settings → External programs)."
+        ready = not self.tools.missing("noise_model")
         self.analyse_button.setEnabled(pair and not busy and not self.tools.missing("ffmpeg") and ready)
-        self.analyse_button.setToolTip(why)
+        self.analyse_button.setToolTip(
+            "Sample a few places to preview and tune the grain. Writing the MKV analyses every frame "
+            "itself." if ready else "Needs AOM noise_model (Settings → External programs).")
         self.detect_button.setEnabled(pair and not busy)
         has_model = self.model is not None
-        can_write = has_model and bool(self.encoded) and self.encoded.codec == "vvc"
-        self.write_button.setEnabled(can_write and not busy and not self.tools.missing("mkvmerge"))
-        self.write_button.setToolTip("" if not self.tools.missing("mkvmerge") else
-                                     "Needs mkvmerge from MKVToolNix (Settings → External programs).")
+        why = ("" if pair else "Choose the source and the encoded video first.") or \
+              ("" if self.encoded.codec == "vvc" else "The encode is not VVC.") or \
+              ("" if analyzer_path().is_file() else "The grain analyzer is not built: run analyzer\\build.py.") or \
+              ("" if not self.tools.missing("ffmpeg", "mkvmerge") else
+               "Needs ffmpeg and mkvmerge from MKVToolNix (Settings → External programs).")
+        self.write_button.setEnabled(not why and not busy)
+        self.write_button.setToolTip(why or "Analyses every frame (or reuses a finished analysis), then "
+                                            "writes the MKV with the strength set above.")
         self.verify_button.setEnabled(bool(self.written) and not busy)
         self.open_folder_button.setEnabled(bool(self.written))
         self.save_model_button.setEnabled(has_model)
         self.export_table_button.setEnabled(has_model)
         self.runs_combo.setEnabled(has_model and self.runs_combo.count() > 0)
-        self.analyse_button.setText("Analyse every frame" if self.full_radio.isChecked() else "Analyse grain")
         for mode, button in self.mode_buttons.items():
             button.setEnabled(mode in self.state.images or (mode in (GRAIN, GRAIN_ONLY) and has_model))
-
-    def _mode_changed(self, *_) -> None:
-        full = self.full_radio.isChecked()
-        for w in (self.quick_options, self.sample_label):
-            w.setVisible(not full)
-        for w in (self.full_options, self.run_label):
-            w.setVisible(full)
-        self._update_estimate()
-        self._update_enabled()
 
     def _fullscan_dir(self) -> Path | None:
         if not (self.source and self.encoded):
@@ -641,33 +617,40 @@ class MainWindow(QMainWindow):
         return self.data_dir / "every-frame" / key
 
     def _update_estimate(self) -> None:
-        if self.full_radio.isChecked():
-            if not analyzer_path().is_file():
-                self.estimate_label.setText("The grain analyzer is not built yet: run analyzer\\build.py.")
-                return
-            if not (self.encoded and self.source):
-                self.estimate_label.setText("Every frame of the encode is compared with the source.")
-                return
-            seconds = estimate_seconds(self.encoded, self.workers_spin.value())
-            h, m = divmod(int(seconds // 60), 60)
-            text = (f"{self.encoded.frame_count:,} frames · about {h} h {m:02d} min on this PC" if h
-                    else f"{self.encoded.frame_count:,} frames · about {max(1, m)} min on this PC")
-            folder = self._fullscan_dir()
-            if folder and (folder / "done.json").exists():
-                text += " · already analysed, will be reused"
-            elif folder:
-                at = checkpoint_frame(folder / "checkpoint.bin")
-                if at:
-                    text += f" · stopped at frame {at:,}, will resume there"
-            self.estimate_label.setText(text + ". Progress is saved about once a minute.")
-            return
         frames = self.runs_spin.value() * self.frames_spin.value()
         text = f"{frames} frames"
         if self.encoded:
             scale = self.encoded.width * self.encoded.height / (3840 * 2160)
             seconds = 6 + 0.38 * frames * scale
             text += f" · about {seconds:.0f} s" if seconds < 90 else f" · about {seconds / 60:.1f} min"
-        self.estimate_label.setText(text)
+        self.estimate_label.setText(text + " · a sample for previewing and tuning")
+        self.write_estimate_label.setText(self._every_frame_text())
+
+    def _every_frame_state(self) -> tuple[str, int | None]:
+        """("done" | "resume" | "new", checkpoint frame) of this pair's every-frame analysis."""
+        folder = self._fullscan_dir()
+        if folder and (folder / "done.json").exists() and (folder / "table.tbl").exists():
+            return "done", None
+        at = checkpoint_frame(folder / "checkpoint.bin") if folder else None
+        return ("resume", at) if at else ("new", None)
+
+    def _every_frame_text(self) -> str:
+        if not analyzer_path().is_file():
+            return "The grain analyzer is not built yet: run analyzer\\build.py."
+        if not (self.encoded and self.source):
+            return "Writing analyses the grain of every frame, like libaom's encoder, then adds it."
+        state, at = self._every_frame_state()
+        if state == "done":
+            return (f"Every frame is already analysed ({self.encoded.frame_count:,} frames): writing "
+                    "takes a minute or two.")
+        seconds = estimate_seconds(self.encoded, self.workers_spin.value())
+        h, m = divmod(int(seconds // 60), 60)
+        took = f"about {h} h {m:02d} min" if h else f"about {max(1, m)} min"
+        text = (f"Writing first analyses all {self.encoded.frame_count:,} frames ({took} on this PC), "
+                "then adds the grain.")
+        if state == "resume":
+            text += f" A stopped analysis continues from frame {at:,}."
+        return text + " Progress is saved about once a minute."
 
     # ------------------------------------------------------------------ jobs
     def _start_job(self, name: str, fn, on_success, busy_text: str) -> None:
@@ -743,9 +726,6 @@ class MainWindow(QMainWindow):
         self._start_job("Offset detection", work, done, "Detecting the frame offset…")
 
     def _analyse(self) -> None:
-        if self.full_radio.isChecked():
-            self._analyse_every_frame()
-            return
         settings = AnalysisSettings(self.runs_spin.value(), self.frames_spin.value(),
                                     self.offset_spin.value(), self.crop)
         src, enc, tools = self.source, self.encoded, self.tools
@@ -756,31 +736,6 @@ class MainWindow(QMainWindow):
 
         self._start_job("Analysis", work, self._analysis_done,
                         f"Analysing {settings.runs} places × {settings.frames_per_run} frames…")
-
-    def _analyse_every_frame(self) -> None:
-        folder = self._fullscan_dir()
-        src, enc, tools, crop = self.source, self.encoded, self.tools, self.crop
-        offset, threads, gpu = self.offset_spin.value(), self.workers_spin.value(), self.gpu_check.isChecked()
-        seconds = estimate_seconds(enc, threads)
-        if seconds > 600 and self.confirm_long_runs:
-            h, m = divmod(int(seconds // 60), 60)
-            answer = QMessageBox.question(
-                self, "Analyse every frame?",
-                f"This analyses all {enc.frame_count:,} frames and will take about {h} h {m:02d} min, "
-                "using most of the CPU. The PC is kept awake while it runs.\n\n"
-                "You can keep browsing frames meanwhile. Progress is saved about once a minute; if "
-                "you cancel or close the app, the next run continues from there.")
-            if answer != QMessageBox.StandardButton.Yes:
-                return
-
-        def work(token, progress):
-            return analyze_every_frame(tools, src, enc, offset, crop, folder, progress, token,
-                                       threads=threads, source_hwaccel=gpu)
-
-        keep_awake(True)
-        self._start_job("Every-frame analysis", work, self._analysis_done,
-                        f"Analysing all {enc.frame_count:,} frames…")
-        self.job.finished.connect(lambda: (keep_awake(False), self._update_estimate()))
 
     confirm_long_runs = True
 
@@ -1190,7 +1145,7 @@ class MainWindow(QMainWindow):
             self._output_is_auto = False
 
     def _write(self) -> None:
-        if not (self.plan and self.encoded):
+        if not (self.source and self.encoded):
             return
         output = Path(self.output_edit.text().strip().strip('"'))
         if output.suffix.lower() != ".mkv":
@@ -1202,12 +1157,38 @@ class MainWindow(QMainWindow):
         if output.exists() and QMessageBox.question(
                 self, "Replace file?", f"{output.name} already exists. Replace it?") != QMessageBox.StandardButton.Yes:
             return
-        params, seed, enc, tools = self.plan, self.seed_spin.value(), self.encoded, self.tools
+        src, enc, tools, crop = self.source, self.encoded, self.tools, self.crop
+        offset, threads, gpu = self.offset_spin.value(), self.workers_spin.value(), self.gpu_check.isChecked()
+        folder, tuning, seed = self._fullscan_dir(), self._tuning(), self.seed_spin.value()
+        state, _ = self._every_frame_state()
+        seconds = estimate_seconds(enc, threads)
+        if state != "done" and seconds > 600 and self.confirm_long_runs:
+            h, m = divmod(int(seconds // 60), 60)
+            answer = QMessageBox.question(
+                self, "Analyse every frame and write?",
+                f"The grain metadata is measured on every frame, like libaom's encoder does. That "
+                f"analyses all {enc.frame_count:,} frames first and takes about {h} h {m:02d} min, using "
+                "most of the CPU. The PC is kept awake while it runs.\n\n"
+                "You can keep browsing frames meanwhile. Progress is saved about once a minute; if "
+                "you cancel or close the app, the next Write continues from there.")
+            if answer != QMessageBox.StandardButton.Yes:
+                return
 
         def work(token, progress):
-            return write_afgs1_mkv(tools, enc, output, params, seed, progress, token)
+            steps = "Step 1 of 2 · " if state != "done" else ""
+            model = analyze_every_frame(tools, src, enc, offset, crop, folder,
+                                        lambda f, m: progress(f, steps + m), token,
+                                        threads=threads, source_hwaccel=gpu)
+            plan = TimelinePlan(model, tuning)
+            report = write_afgs1_mkv(tools, enc, output, plan, seed,
+                                     lambda f, m: progress(f, ("Step 2 of 2 · " if steps else "") + m), token)
+            return model, plan, report
 
-        def done(report: WriteReport):
+        def done(result):
+            model, params, report = result
+            # The preview now shows what was written: the every-frame parameters.
+            self._set_model(model)
+            self._store_model_cache(model)
             self.written = Written(report, params, seed)
             size = report.output.stat().st_size / 1e9
             text = (f"Wrote {report.output.name} ({size:.2f} GB): grain metadata on all "
@@ -1219,7 +1200,9 @@ class MainWindow(QMainWindow):
             self._log(text)
             self._update_enabled()
 
+        keep_awake(True)
         self._start_job("Writing", work, done, f"Writing {output.name}…")
+        self.job.finished.connect(lambda: (keep_awake(False), self._update_estimate()))
 
     def _verify(self) -> None:
         if not (self.written and self.encoded):
@@ -1262,8 +1245,8 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------ close
     def closeEvent(self, event) -> None:
         if self._busy():
-            extra = (" Finished parts are kept; the next run continues from there."
-                     if self.job.name == "Every-frame analysis" else "")
+            extra = (" The grain analysis so far is kept; the next Write continues from there."
+                     if self.job.name == "Writing" else "")
             answer = QMessageBox.question(self, "Work in progress",
                                           f"{self.job.name} is still running. Cancel it and quit?{extra}")
             if answer != QMessageBox.StandardButton.Yes:

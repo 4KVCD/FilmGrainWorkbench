@@ -42,17 +42,15 @@ def test_full_workflow(qapp, tools, need, grainy_source, grainy_clip, tmp_path):
     w.encoded_edit.setText(str(grainy_clip))
     w._load_video("encoded")
     wait_for(qapp, lambda: idle() and SOURCE in w.state.images and ENCODED in w.state.images)
-    assert not w.write_button.isEnabled()               # nothing to write before analysis
     assert w.analyse_button.isEnabled()
 
-    assert w.full_radio.isChecked()                     # every frame unless the user picks Quick
-    w.quick_radio.setChecked(True)
     w.runs_spin.setValue(3)
     w.frames_spin.setValue(6)
     w._analyse()
     wait_for(qapp, lambda: not w._busy() and w.model is not None)
     wait_for(qapp, lambda: idle() and GRAIN in w.state.images)
     assert "3 of 3 places used" in w.analysis_label.text()
+    assert w.model.kind == "quick"
 
     QTest.keyClick(w, Qt.Key.Key_Right)
     assert w.state.mode == GRAIN
@@ -69,8 +67,10 @@ def test_full_workflow(qapp, tools, need, grainy_source, grainy_clip, tmp_path):
 
     w.output_edit.setText(str(tmp_path / "out.mkv"))
     w._write()
-    wait_for(qapp, lambda: not w._busy() and w.written is not None)
+    wait_for(qapp, lambda: not w._busy() and w.written is not None, timeout=300)
     assert (tmp_path / "out.mkv").is_file()
+    assert w.model.kind == "every-frame"                # written from every frame, not the sample
+    wait_for(qapp, idle)
     w._verify()
     wait_for(qapp, lambda: not w._busy() and "matches the preview exactly" in w.write_label.text())
     w.close()
@@ -94,23 +94,21 @@ def test_every_frame_workflow(qapp, tools, need, grainy_source, grainy_clip, tmp
     w._load_video("encoded")
     wait_for(qapp, idle)
 
-    w.full_radio.setChecked(True)
-    assert w.full_options.isVisibleTo(w) and not w.quick_options.isVisibleTo(w)
-    assert w.analyse_button.text() == "Analyse every frame"
+    # No Analyse grain first: Write analyses every frame by itself.
+    assert w.model is None and w.write_button.isEnabled()
+    assert "Writing first analyses all" in w.write_estimate_label.text()
     w.gpu_check.setChecked(False)
-    w._analyse()
-    wait_for(qapp, lambda: not w._busy() and w.model is not None)
+    w.output_edit.setText(str(tmp_path / "every.mkv"))
+    w._write()
+    wait_for(qapp, lambda: not w._busy() and w.written is not None, timeout=300)
     wait_for(qapp, lambda: idle() and GRAIN in w.state.images)
     assert "Every frame analysed" in w.analysis_label.text()
+    assert "already analysed" in w.write_estimate_label.text()
     assert w.grain_timeline.isVisibleTo(w)
     assert "At this frame" in w.tune_label.text()
 
     w.grain_timeline.frame_clicked.emit(30)
     wait_for(qapp, lambda: idle() and w.current_index == 30)
-
-    w.output_edit.setText(str(tmp_path / "every.mkv"))
-    w._write()
-    wait_for(qapp, lambda: not w._busy() and w.written is not None)
     w._verify()
     wait_for(qapp, lambda: not w._busy() and "matches the preview exactly" in w.write_label.text())
 

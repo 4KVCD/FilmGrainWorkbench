@@ -118,9 +118,9 @@ def default_threads() -> int:
 
 
 def estimate_seconds(encoded: VideoInfo, threads: int) -> float:
-    """Rough wall time: ~1 CPU-second per 4K frame of noise-model work, plus decoding."""
+    """Rough wall time, measured on a 4K HDR cut: ~11 fps on 24 threads, decoding included."""
     scale = encoded.width * encoded.height / (3840 * 2160)
-    cpu_per_frame = 1.15 * scale
+    cpu_per_frame = 1.85 * scale
     return encoded.frame_count * cpu_per_frame / max(1, min(threads, cpu_count()) * 0.85)
 
 
