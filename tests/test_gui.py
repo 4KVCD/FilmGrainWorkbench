@@ -45,6 +45,8 @@ def test_full_workflow(qapp, tools, need, grainy_source, grainy_clip, tmp_path):
     assert not w.write_button.isEnabled()               # nothing to write before analysis
     assert w.analyse_button.isEnabled()
 
+    assert w.full_radio.isChecked()                     # every frame unless the user picks Quick
+    w.quick_radio.setChecked(True)
     w.runs_spin.setValue(3)
     w.frames_spin.setValue(6)
     w._analyse()

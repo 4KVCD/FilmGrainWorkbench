@@ -141,12 +141,12 @@ class MainWindow(QMainWindow):
         mode_row = QHBoxLayout()
         self.quick_radio = QRadioButton("Quick sample")
         self.full_radio = QRadioButton("Every frame")
-        self.quick_radio.setToolTip("Sample a few places and apply one grain model to the whole video. "
-                                    "About a minute.")
+        self.quick_radio.setToolTip("Sample a few places and apply one grain setting to the whole video. "
+                                    "About a minute; for previewing, not for the final file.")
         self.full_radio.setToolTip("Analyse every frame with AOM noise_model, like libaom's encoder: the "
                                    "grain parameters follow the film shot by shot. Takes hours for a 4K "
                                    "film; can be stopped and resumed.")
-        self.quick_radio.setChecked(True)
+        self.full_radio.setChecked(True)
         for radio in (self.quick_radio, self.full_radio):
             radio.toggled.connect(self._mode_changed)
             mode_row.addWidget(radio)
@@ -452,7 +452,9 @@ class MainWindow(QMainWindow):
         self.chroma_spin.setValue(int(s.value("tune/chroma", 100)))
         self.seed_spin.setValue(int(s.value("tune/seed", 7391)))
         self.overlap_check.setChecked(s.value("tune/overlap", "true") in (True, "true"))
-        self.full_radio.setChecked(s.value("analysis/mode", "quick") == "every")
+        # "analysis/mode" held Quick sample as the old default, not as a choice.
+        if s.value("analysis/grain_mode", "every") == "quick":
+            self.quick_radio.setChecked(True)
         self.workers_spin.setValue(int(s.value("analysis/threads", default_threads())))
         self.gpu_check.setChecked(s.value("analysis/gpu", "true") in (True, "true"))
         self._mode_changed()
@@ -467,7 +469,7 @@ class MainWindow(QMainWindow):
         s.setValue("files/encoded", self.encoded_edit.text())
         s.setValue("analysis/runs", self.runs_spin.value())
         s.setValue("analysis/frames", self.frames_spin.value())
-        s.setValue("analysis/mode", "every" if self.full_radio.isChecked() else "quick")
+        s.setValue("analysis/grain_mode", "every" if self.full_radio.isChecked() else "quick")
         s.setValue("analysis/threads", self.workers_spin.value())
         s.setValue("analysis/gpu", self.gpu_check.isChecked())
         s.setValue("tune/luma", self.luma_spin.value())
@@ -787,7 +789,7 @@ class MainWindow(QMainWindow):
             # Quick sample: one parameter set for the whole video, as a one-segment timeline.
             params = build_params(model, Tuning()).params
             scale = 1 << (model.bit_depth - 8)
-            runs = [{"start": r.start, "psnr": round(r.psnr, 2), "alignment": r.alignment,
+            runs = [{"start": r.start, "frames": r.frames, "psnr": round(r.psnr, 2), "alignment": r.alignment,
                      "luma8": None if r.luma_sigma is None else [round(float(v) / scale, 3) for v in r.luma_sigma]}
                     for r in model.runs]
             model = quick_timeline(params, self.encoded, model.seconds, {"runs": runs})
@@ -812,7 +814,11 @@ class MainWindow(QMainWindow):
             ok = [r for r in runs if r["alignment"] in ("ok", "unclear") and r["psnr"] > 0]
             excluded = len(runs) - len(ok)
             mid = (model.sigma_values[0] / scale) if model.sigma_values else 0.0
-            text = (f"{len(ok)} of {len(runs)} places used"
+            sampled = sum(r.get("frames", 0) for r in runs)
+            text = (f"Quick sample, not the whole video: {len(runs)} places"
+                    + (f" ({sampled:,} frames)" if sampled else "")
+                    + f", one grain setting for all {model.frames:,} frames. "
+                    f"{len(ok)} of {len(runs)} places used"
                     + (f" ({excluded} excluded: frames did not line up)" if excluded else "")
                     + (f", median match {np.median([r['psnr'] for r in ok]):.1f} dB" if ok else "")
                     + f". The encode lost grain of σ ≈ {mid:.2f} (8-bit) at mid-grey.{took}")
