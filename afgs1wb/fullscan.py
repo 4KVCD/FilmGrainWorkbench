@@ -134,6 +134,8 @@ class _ChunkRun:
         self._procs: list[subprocess.Popen] = []
         self._pipes: list[NamedPipeWriter] = []
         self._errors: list[str] = []
+        self.delivered: dict[str, int] = {}
+        self._stopping = False
         self._lock = threading.Lock()
         self.reported = False
 
@@ -173,13 +175,18 @@ class _ChunkRun:
                     self.samples[(which, k)] = y
                 pipe.write(buf)
                 k += 1
+                self.delivered[which] = k
             proc.wait()
             self.cancel._untrack(proc)
-            if proc.returncode not in (0, None) and not self.cancel.cancelled:
-                self._errors.append(f"ffmpeg ({which}) failed: " + " / ".join(list(errors)[-3:]))
+            # A decoder we stopped during cleanup is not a failure; one that died
+            # before delivering its frames is.
+            if proc.returncode not in (0, None) and not self.cancel.cancelled                     and not (self._stopping and k >= self.count):
+                self._errors.append(f"ffmpeg ({which}) failed after {k} of {self.count} frames: "
+                                    + (" / ".join(list(errors)[-3:]) or f"exit code {proc.returncode}"))
         except PipeClosed:
             pass
         finally:
+            self.delivered.setdefault(which, 0)
             pipe.close()
 
     def check_alignment(self, final: bool = False) -> str | None:
@@ -227,12 +234,21 @@ class _ChunkRun:
             self.cancel._untrack(model)
             for p in self._pipes:
                 p.unblock()
+            # noise_model stops as soon as the source ends; give the encode's
+            # decoder a moment to exit on its own before stopping it.
+            for t in relays:
+                t.join(timeout=20)
+            self._stopping = True
             for proc in self._procs:
                 if proc.poll() is None:
                     proc.kill()
             for t in relays:
                 t.join(timeout=30)
         self.cancel.check()
+        if self.delivered.get("src", 0) != self.delivered.get("enc", 0):
+            self._errors.append(f"source and encode delivered different frame counts "
+                                f"({self.delivered.get('src', 0)} vs {self.delivered.get('enc', 0)}) "
+                                f"for frames {self.start:,}+")
         if model.returncode != 0 or not partial.exists():
             detail = " / ".join(list(model_err)[-3:]) or "no output"
             raise ToolError(f"noise_model failed on frames {self.start:,}-{self.start + self.count:,}: "
@@ -303,12 +319,21 @@ def segment_sigmas(segments: list[Segment], bit_depth: int, cancel: CancelToken)
         for seg in segments:
             seg.luma_mid_sigma = _segment_sigma(seg.params, bit_depth)
         return
-    with ProcessPoolExecutor(max(2, cpu_count() - 2)) as pool:
-        results = pool.map(_sigmas_batch, [([s.params for s in b], bit_depth) for b in batches])
-        for batch, sigmas in zip(batches, results):
-            cancel.check()
-            for seg, sigma in zip(batch, sigmas):
-                seg.luma_mid_sigma = sigma
+    from concurrent.futures.process import BrokenProcessPool
+    try:
+        with ProcessPoolExecutor(max(2, cpu_count() - 2)) as pool:
+            results = pool.map(_sigmas_batch, [([s.params for s in b], bit_depth) for b in batches])
+            for batch, sigmas in zip(batches, results):
+                cancel.check()
+                for seg, sigma in zip(batch, sigmas):
+                    seg.luma_mid_sigma = sigma
+    except (BrokenProcessPool, OSError):
+        # Worker processes could not start (e.g. an unguarded __main__ script);
+        # do it here instead, slower but correct.
+        for i, seg in enumerate(segments):
+            if i % 100 == 0:
+                cancel.check()
+            seg.luma_mid_sigma = _segment_sigma(seg.params, bit_depth)
 
 
 def analyze_every_frame(tools: Tools, source: VideoInfo, encoded: VideoInfo, offset: int,
