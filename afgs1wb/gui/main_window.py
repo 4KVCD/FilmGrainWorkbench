@@ -22,16 +22,14 @@ from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QFileDialog, 
 from .. import display, synth
 from ..afgs1 import picture_seed
 from ..analysis import AnalysisSettings, GrainModel, analyze, detect_offset, entry_sigmas
-from ..fullscan import (TimelineModel, analyze_every_frame, cache_key, completed_chunks,
-                        default_workers, estimate_seconds, plan_chunks)
+from ..fullscan import (TimelineModel, analyze_every_frame, analyzer_path, cache_key,
+                        checkpoint_frame, default_threads, estimate_seconds, quick_timeline)
 from ..frames import Crop, Frame, Geometry, read_frame, read_frames, source_crop_for
 from ..grain_params import TableEntry, format_grain_table
 from ..mux import WriteReport, write_afgs1_mkv
 from ..probe import VideoInfo, probe
-from ..tools import Tools, ToolError, detect_tools
-from ..tuning import (BuiltParams, GrainPlan, StaticPlan, TimelinePlan, Tuning, build_params,
-                      sigma_in_8bit_units)
-from ..winpipe import keep_awake
+from ..tools import Tools, ToolError, detect_tools, keep_awake
+from ..tuning import GrainPlan, TimelinePlan, Tuning, build_params, sigma_in_8bit_units
 from .curves import CurvePlot
 from .jobs import Job
 from .timeline import GrainTimeline
@@ -75,8 +73,7 @@ class MainWindow(QMainWindow):
         self.source: VideoInfo | None = None
         self.encoded: VideoInfo | None = None
         self.crop: Crop | None = None
-        self.model: GrainModel | TimelineModel | None = None
-        self.built: BuiltParams | None = None
+        self.model: TimelineModel | None = None
         self.plan: GrainPlan | None = None
         self.written: Written | None = None
         self.job: Job | None = None
@@ -174,15 +171,15 @@ class MainWindow(QMainWindow):
         self.sample_label = form.labelForField(self.quick_options)
         full_row = QHBoxLayout()
         full_row.setContentsMargins(0, 0, 0, 0)
-        self.workers_spin = QSpinBox(minimum=1, maximum=32, value=default_workers())
-        self.workers_spin.setToolTip("noise_model processes running at once. Each is single-threaded; "
-                                     "about half your CPU threads is usually fastest.")
+        self.workers_spin = QSpinBox(minimum=1, maximum=128, value=default_threads())
+        self.workers_spin.setToolTip("Threads for the grain analysis. All CPU threads is fastest; use "
+                                     "fewer to keep the PC responsive while it runs.")
         self.gpu_check = QCheckBox("Decode source on GPU")
         self.gpu_check.setChecked(True)
         self.gpu_check.setToolTip("Let ffmpeg decode the source with hardware acceleration (bit-exact) "
                                   "to leave the CPU to noise_model.")
         full_row.addWidget(self.workers_spin)
-        full_row.addWidget(QLabel("parallel jobs"))
+        full_row.addWidget(QLabel("threads"))
         full_row.addWidget(self.gpu_check)
         full_row.addStretch(1)
         self.full_options = QWidget()
@@ -456,7 +453,7 @@ class MainWindow(QMainWindow):
         self.seed_spin.setValue(int(s.value("tune/seed", 7391)))
         self.overlap_check.setChecked(s.value("tune/overlap", "true") in (True, "true"))
         self.full_radio.setChecked(s.value("analysis/mode", "quick") == "every")
-        self.workers_spin.setValue(int(s.value("analysis/workers", default_workers())))
+        self.workers_spin.setValue(int(s.value("analysis/threads", default_threads())))
         self.gpu_check.setChecked(s.value("analysis/gpu", "true") in (True, "true"))
         self._mode_changed()
 
@@ -471,7 +468,7 @@ class MainWindow(QMainWindow):
         s.setValue("analysis/runs", self.runs_spin.value())
         s.setValue("analysis/frames", self.frames_spin.value())
         s.setValue("analysis/mode", "every" if self.full_radio.isChecked() else "quick")
-        s.setValue("analysis/workers", self.workers_spin.value())
+        s.setValue("analysis/threads", self.workers_spin.value())
         s.setValue("analysis/gpu", self.gpu_check.isChecked())
         s.setValue("tune/luma", self.luma_spin.value())
         s.setValue("tune/chroma", self.chroma_spin.value())
@@ -548,7 +545,7 @@ class MainWindow(QMainWindow):
         self._save()
 
     def _pair_changed(self) -> None:
-        self.model = self.built = self.plan = self.written = None
+        self.model = self.plan = self.written = None
         self.frame_cache.clear()
         self.crop = None
         notes = []
@@ -603,9 +600,14 @@ class MainWindow(QMainWindow):
         for w in (self.source_edit, self.encoded_edit, self.runs_spin, self.frames_spin, self.offset_spin,
                   self.quick_radio, self.full_radio, self.workers_spin, self.gpu_check):
             w.setEnabled(not busy)
-        self.analyse_button.setEnabled(pair and not busy and not self.tools.missing("ffmpeg", "noise_model"))
-        self.analyse_button.setToolTip("" if not self.tools.missing("noise_model") else
-                                       "Needs AOM noise_model (Settings → External programs).")
+        if self.full_radio.isChecked():
+            ready = analyzer_path().is_file()
+            why = "" if ready else "The grain analyzer is not built: run analyzer\\build.py."
+        else:
+            ready = not self.tools.missing("noise_model")
+            why = "" if ready else "Needs AOM noise_model (Settings → External programs)."
+        self.analyse_button.setEnabled(pair and not busy and not self.tools.missing("ffmpeg") and ready)
+        self.analyse_button.setToolTip(why)
         self.detect_button.setEnabled(pair and not busy)
         has_model = self.model is not None
         can_write = has_model and bool(self.encoded) and self.encoded.codec == "vvc"
@@ -631,14 +633,16 @@ class MainWindow(QMainWindow):
         self._update_enabled()
 
     def _fullscan_dir(self) -> Path | None:
-        if not (self.source and self.encoded and self.tools.noise_model
-                and Path(self.tools.noise_model).is_file()):
+        if not (self.source and self.encoded):
             return None
-        key = cache_key(self.source, self.encoded, self.offset_spin.value(), self.crop, self.tools.noise_model)
+        key = cache_key(self.source, self.encoded, self.offset_spin.value(), self.crop)
         return self.data_dir / "every-frame" / key
 
     def _update_estimate(self) -> None:
         if self.full_radio.isChecked():
+            if not analyzer_path().is_file():
+                self.estimate_label.setText("The grain analyzer is not built yet: run analyzer\\build.py.")
+                return
             if not (self.encoded and self.source):
                 self.estimate_label.setText("Every frame of the encode is compared with the source.")
                 return
@@ -647,14 +651,13 @@ class MainWindow(QMainWindow):
             text = (f"{self.encoded.frame_count:,} frames · about {h} h {m:02d} min on this PC" if h
                     else f"{self.encoded.frame_count:,} frames · about {max(1, m)} min on this PC")
             folder = self._fullscan_dir()
-            try:
-                chunks = plan_chunks(self.encoded, self.source, self.offset_spin.value())
-                done = completed_chunks(folder, chunks) if folder and folder.exists() else set()
-                if done:
-                    text += f" · {len(done)} of {len(chunks)} parts already done, will resume"
-            except ValueError:
-                pass
-            self.estimate_label.setText(text + ". Can be stopped and resumed later.")
+            if folder and (folder / "done.json").exists():
+                text += " · already analysed, will be reused"
+            elif folder:
+                at = checkpoint_frame(folder / "checkpoint.bin")
+                if at:
+                    text += f" · stopped at frame {at:,}, will resume there"
+            self.estimate_label.setText(text + ". Progress is saved about once a minute.")
             return
         frames = self.runs_spin.value() * self.frames_spin.value()
         text = f"{frames} frames"
@@ -755,22 +758,22 @@ class MainWindow(QMainWindow):
     def _analyse_every_frame(self) -> None:
         folder = self._fullscan_dir()
         src, enc, tools, crop = self.source, self.encoded, self.tools, self.crop
-        offset, workers, gpu = self.offset_spin.value(), self.workers_spin.value(), self.gpu_check.isChecked()
-        seconds = estimate_seconds(enc, workers)
+        offset, threads, gpu = self.offset_spin.value(), self.workers_spin.value(), self.gpu_check.isChecked()
+        seconds = estimate_seconds(enc, threads)
         if seconds > 600 and self.confirm_long_runs:
             h, m = divmod(int(seconds // 60), 60)
             answer = QMessageBox.question(
                 self, "Analyse every frame?",
                 f"This analyses all {enc.frame_count:,} frames and will take about {h} h {m:02d} min, "
                 "using most of the CPU. The PC is kept awake while it runs.\n\n"
-                "You can keep browsing frames meanwhile. If you cancel or close the app, finished "
-                "parts are kept and the next run continues from there.")
+                "You can keep browsing frames meanwhile. Progress is saved about once a minute; if "
+                "you cancel or close the app, the next run continues from there.")
             if answer != QMessageBox.StandardButton.Yes:
                 return
 
         def work(token, progress):
             return analyze_every_frame(tools, src, enc, offset, crop, folder, progress, token,
-                                       workers=workers, source_hwaccel=gpu)
+                                       threads=threads, source_hwaccel=gpu)
 
         keep_awake(True)
         self._start_job("Every-frame analysis", work, self._analysis_done,
@@ -780,6 +783,14 @@ class MainWindow(QMainWindow):
     confirm_long_runs = True
 
     def _analysis_done(self, model) -> None:
+        if isinstance(model, GrainModel):
+            # Quick sample: one parameter set for the whole video, as a one-segment timeline.
+            params = build_params(model, Tuning()).params
+            scale = 1 << (model.bit_depth - 8)
+            runs = [{"start": r.start, "psnr": round(r.psnr, 2), "alignment": r.alignment,
+                     "luma8": None if r.luma_sigma is None else [round(float(v) / scale, 3) for v in r.luma_sigma]}
+                    for r in model.runs]
+            model = quick_timeline(params, self.encoded, model.seconds, {"runs": runs})
         self._set_model(model)
         self._store_model_cache(model)
         h, rem = divmod(int(model.seconds), 3600)
@@ -787,58 +798,42 @@ class MainWindow(QMainWindow):
         self.status_label.setText(f"Analysis finished in {took}.")
         self._log(self.analysis_label.text())
 
-    def _set_model(self, model, loaded_from: str | None = None) -> None:
-        if isinstance(model, TimelineModel):
-            self._set_timeline_model(model, loaded_from)
-            return
-        self.grain_timeline.hide()
-        self.model = model
-        self.written = None
-        runs = model.runs
-        ok = [r for r in runs if r.alignment in ("ok", "unclear") and r.psnr > 0]
-        excluded = len(runs) - len(ok)
-        mid = float(sigma_in_8bit_units(model.luma_sigma, model.bit_depth)[128])
-        text = (f"{len(ok)} of {len(runs)} places used"
-                + (f" ({excluded} excluded: frames did not line up)" if excluded else "")
-                + (f", median match {np.median([r.psnr for r in ok]):.1f} dB" if ok else "")
-                + f". The encode lost grain of σ ≈ {mid:.2f} (8-bit) at mid-grey.")
-        if model.seconds:
-            text += f" Took {model.seconds:.0f} s."
-        if loaded_from:
-            text = f"Loaded from {loaded_from}. " + text
-        self.analysis_label.setText(text)
-        self.runs_combo.clear()
-        fps = float(self.encoded.fps) if self.encoded else 24.0
-        for r in runs:
-            mark = "" if r.alignment in ("ok", "unclear") else "  (excluded)"
-            self.runs_combo.addItem(f"{_timecode(r.start / fps)} · frame {r.start:,} · {r.psnr:.1f} dB{mark}",
-                                    r.start)
-        self._retune()
-        self._update_enabled()
-
-    def _set_timeline_model(self, model: TimelineModel, loaded_from: str | None) -> None:
+    def _set_model(self, model: TimelineModel, loaded_from: str | None = None) -> None:
         self.model = model
         self.written = None
         self.runs_combo.clear()
-        sigmas = np.array([s.luma_mid_sigma for s in model.segments]) / (1 << (model.bit_depth - 8))
-        lengths = np.array([s.end - s.start for s in model.segments], dtype=float)
-        order = np.argsort(sigmas)
-        cum = np.cumsum(lengths[order]) / lengths.sum()
-        pct = lambda q: float(sigmas[order][min(len(order) - 1, np.searchsorted(cum, q))])
+        scale = 1 << (model.bit_depth - 8)
         h, rem = divmod(int(model.seconds), 3600)
-        took = f" Took {h} h {rem // 60:02d} min." if model.seconds >= 3600 else (
-            f" Took {model.seconds / 60:.0f} min." if model.seconds >= 60 else (
-                f" Took {model.seconds:.0f} s." if model.seconds else ""))
-        text = (f"Every frame analysed: {model.frames:,} frames in {len(model.segments):,} segments. "
-                f"Grain σ at mid-grey across the film: median {pct(0.5):.2f}, "
-                f"5–95 % range {pct(0.05):.2f}–{pct(0.95):.2f} (8-bit).{took}")
-        if model.shifted_chunks:
-            text += (f" ⚠ {len(model.shifted_chunks)} part(s) did not line up frame-for-frame "
-                     "(check the offset).")
+        took = (f" Took {h} h {rem // 60:02d} min." if model.seconds >= 3600 else
+                f" Took {model.seconds / 60:.0f} min." if model.seconds >= 60 else
+                f" Took {model.seconds:.0f} s." if model.seconds else "")
+        if model.kind == "quick":
+            runs = model.notes.get("runs", [])
+            ok = [r for r in runs if r["alignment"] in ("ok", "unclear") and r["psnr"] > 0]
+            excluded = len(runs) - len(ok)
+            mid = (model.sigma_values[0] / scale) if model.sigma_values else 0.0
+            text = (f"{len(ok)} of {len(runs)} places used"
+                    + (f" ({excluded} excluded: frames did not line up)" if excluded else "")
+                    + (f", median match {np.median([r['psnr'] for r in ok]):.1f} dB" if ok else "")
+                    + f". The encode lost grain of σ ≈ {mid:.2f} (8-bit) at mid-grey.{took}")
+            fps = float(model.fps)
+            for r in runs:
+                mark = "" if r["alignment"] in ("ok", "unclear") else "  (excluded)"
+                self.runs_combo.addItem(f"{_timecode(r['start'] / fps)} · frame {r['start']:,} · "
+                                        f"{r['psnr']:.1f} dB{mark}", r["start"])
+            self.grain_timeline.hide()
+        else:
+            values = np.array(model.sigma_values or [0.0]) / scale
+            text = (f"Every frame analysed: {model.frames:,} frames, {len(model.segments):,} parameter "
+                    f"changes. Grain σ at mid-grey across the film: median {np.median(values):.2f}, "
+                    f"5–95 % {np.percentile(values, 5):.2f}–{np.percentile(values, 95):.2f} (8-bit).{took}")
+            if model.alignment.count("shifted"):
+                text += (f" ⚠ {model.alignment.count('shifted')} of {len(model.alignment)} alignment "
+                         "checks matched a neighbouring frame better (check the offset).")
+            self.grain_timeline.show()
         if loaded_from:
             text = f"Loaded from {loaded_from}. " + text
         self.analysis_label.setText(text)
-        self.grain_timeline.show()
         self._retune()
         self._update_enabled()
 
@@ -865,24 +860,24 @@ class MainWindow(QMainWindow):
         folder = self.data_dir / "models"
         return folder / (hashlib.sha1(key.encode()).hexdigest()[:16] + ".json")
 
-    def _store_model_cache(self, model) -> None:
+    def _store_model_cache(self, model: TimelineModel) -> None:
         path = self._cache_path()
         if path:
-            if isinstance(model, TimelineModel):
-                path = path.with_suffix(".timeline.json")
+            path = path.with_suffix(f".{model.kind}.json")
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(model.to_json(), encoding="utf-8")
 
     @staticmethod
-    def _model_from_json(text: str):
-        return TimelineModel.from_json(text) if '"kind": "timeline"' in text[:200] else GrainModel.from_json(text)
+    def _model_from_json(text: str) -> TimelineModel:
+        return TimelineModel.from_json(text)
 
     def _autoload_model(self) -> None:
         path = self._cache_path()
         if not path:
             return
-        for candidate, label in ((path.with_suffix(".timeline.json"), "the previous every-frame analysis"),
-                                 (path, "the previous analysis of these files")):
+        for suffix, label in ((".every-frame.json", "the previous every-frame analysis"),
+                              (".quick.json", "the previous analysis of these files")):
+            candidate = path.with_suffix(suffix)
             if candidate.is_file():
                 try:
                     self._set_model(self._model_from_json(candidate.read_text(encoding="utf-8")),
@@ -923,11 +918,8 @@ class MainWindow(QMainWindow):
                                               "Film grain table (*.tbl *.txt)")
         if not path:
             return
-        if isinstance(self.model, TimelineModel):
-            entries = [TableEntry(e.start, e.end, self.plan.params_at(seg.start))
-                       for e, seg in zip(self.model.grain_table(), self.model.segments)]
-        else:
-            entries = [TableEntry(0, 2 ** 63 - 1, self.plan.params_at(0))]
+        entries = [TableEntry(e.start, e.end, self.plan.params_at(seg.start))
+                   for e, seg in zip(self.model.grain_table(), self.model.segments)]
         Path(path).write_text(format_grain_table(entries), encoding="ascii")
         self._log(f"Exported grain table ({len(entries):,} entries) to {path}")
 
@@ -948,54 +940,42 @@ class MainWindow(QMainWindow):
         if not self.model:
             return
         tuning = self._tuning()
-        if isinstance(self.model, TimelineModel):
-            m = self.model
-            self.plan = TimelinePlan(m, tuning)
-            starts = np.array([seg.start for seg in m.segments])
-            sigmas = np.array([seg.luma_mid_sigma for seg in m.segments]) / (1 << (m.bit_depth - 8))
-            self.grain_timeline.set_data(m.frames, starts, sigmas * tuning.luma_strength, float(m.fps))
-            self.grain_timeline.set_current(self.current_index)
-            self._update_segment_plot()
-            self._save()
-            self._render_grain()
-            return
-        try:
-            self.built = build_params(self.model, tuning)
-        except ValueError as exc:
-            self.tune_label.setText(f"Cannot build parameters: {exc}")
-            return
         m = self.model
-        to8 = lambda a: sigma_in_8bit_units(a, m.bit_depth)
-        self.plot.set_data(to8(m.luma_sigma) * tuning.luma_strength, to8(m.cb_sigma) * tuning.chroma_strength,
-                           to8(m.cr_sigma) * tuning.chroma_strength,
-                           [to8(r.luma_sigma) for r in m.runs if r.luma_sigma is not None])
-        self.plan = StaticPlan(self.built.params, self.built.clipped)
-        p = self.built.params
-        mid = float(to8(m.luma_sigma)[128])
-        text = (f"Mid-grey luma grain σ {mid * tuning.luma_strength:.2f} (8-bit) · "
-                f"{len(p.y_points)} luma / {len(p.cb_points)} chroma points · scaling shift {p.scaling_shift}")
-        if self.built.clipped:
-            text += " · ⚠ strength capped by the format's maximum"
-        self.tune_label.setText(text)
+        self.plan = TimelinePlan(m, tuning)
+        if m.kind != "quick":
+            scale = 1 << (m.bit_depth - 8)
+            self.grain_timeline.set_data(m.frames, np.array(m.sigma_frames),
+                                         np.array(m.sigma_values) / scale * tuning.luma_strength,
+                                         float(m.fps))
+            self.grain_timeline.set_current(self.current_index)
+        self._update_segment_plot()
         self._save()
         self._render_grain()
 
     def _update_segment_plot(self) -> None:
-        """Every-frame mode: show the brightness curves of the segment at the current frame."""
-        if not (isinstance(self.model, TimelineModel) and self.plan):
+        """Brightness curves of the parameters in use at the current frame."""
+        if not (self.model and self.plan):
             return
         m, tuning = self.model, self._tuning()
-        segment = m.segment_at(self.current_index)
         params = self.plan.params_at(self.current_index)
         y, cb, cr = entry_sigmas(params, m.bit_depth, m.subsampling_x, m.subsampling_y)
         to8 = lambda a: sigma_in_8bit_units(a, m.bit_depth)
-        self.plot.set_data(to8(y), to8(cb), to8(cr), [])
-        fps = float(m.fps)
-        text = (f"This shot (frames {segment.start:,}–{segment.end - 1:,}, "
-                f"{(segment.end - segment.start) / fps:.1f} s): luma grain σ "
-                f"{float(to8(y)[128]):.2f} at mid-grey (8-bit) with {tuning.luma_strength * 100:.0f} % strength.")
+        mid = float(to8(y)[128])
+        if m.kind == "quick":
+            runs = [np.array(r["luma8"]) for r in m.notes.get("runs", []) if r.get("luma8")]
+            self.plot.set_data(to8(y), to8(cb), to8(cr), runs)
+            text = (f"Mid-grey luma grain σ {mid:.2f} (8-bit) at {tuning.luma_strength * 100:.0f} % strength · "
+                    f"{len(params.y_points)} luma / {len(params.cb_points)} chroma points · "
+                    f"scaling shift {params.scaling_shift}")
+        else:
+            segment = m.segment_at(self.current_index)
+            self.plot.set_data(to8(y), to8(cb), to8(cr), [])
+            fps = float(m.fps)
+            text = (f"At this frame (parameters of frames {segment.start:,}–{segment.end - 1:,}, "
+                    f"{(segment.end - segment.start) / fps:.1f} s): luma grain σ {mid:.2f} at mid-grey "
+                    f"(8-bit) with {tuning.luma_strength * 100:.0f} % strength.")
         if self.plan.clipped:
-            text += " ⚠ some segments hit the format's maximum strength."
+            text += " ⚠ strength capped by the format's maximum somewhere."
         self.tune_label.setText(text)
 
     # ------------------------------------------------------------------ frames
@@ -1120,8 +1100,7 @@ class MainWindow(QMainWindow):
         self.state.set_images(images, self._caption(index))
         if not self._busy():
             self.status_label.setText(f"Frame {index:,} loaded.")
-        if isinstance(self.model, TimelineModel):
-            self._update_segment_plot()
+        self._update_segment_plot()
         self._update_enabled()
 
     def _frame_failed(self, index: int, message: str) -> None:

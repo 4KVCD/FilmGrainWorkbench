@@ -135,3 +135,12 @@ def detect_tools() -> Tools:
 
 def cpu_count() -> int:
     return os.cpu_count() or 4
+
+
+def keep_awake(on: bool) -> None:
+    """Stop Windows sleeping during long work (the display may still turn off)."""
+    if os.name != "nt":
+        return
+    import ctypes
+    ES_CONTINUOUS, ES_SYSTEM_REQUIRED = 0x80000000, 0x00000001
+    ctypes.windll.kernel32.SetThreadExecutionState(ES_CONTINUOUS | (ES_SYSTEM_REQUIRED if on else 0))

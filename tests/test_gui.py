@@ -63,7 +63,7 @@ def test_full_workflow(qapp, tools, need, grainy_source, grainy_clip, tmp_path):
 
     w.luma_spin.setValue(250)
     wait_for(qapp, lambda: idle() and not w.tune_timer.isActive())
-    assert w.built.params.y_points
+    assert w.plan.params_at(w.current_index).y_points
 
     w.output_edit.setText(str(tmp_path / "out.mkv"))
     w._write()
@@ -80,7 +80,8 @@ def test_every_frame_workflow(qapp, tools, need, grainy_source, grainy_clip, tmp
     from afgs1wb.gui.main_window import MainWindow
     from afgs1wb.gui.viewer import GRAIN
 
-    monkeypatch.setattr(fullscan, "CHUNK_FRAMES", 20)
+    if not fullscan.analyzer_path().is_file():
+        pytest.skip("grain analyzer not built")
     settings = QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat)
     w = MainWindow(settings, tmp_path / "data")
     w.show()
@@ -100,7 +101,7 @@ def test_every_frame_workflow(qapp, tools, need, grainy_source, grainy_clip, tmp
     wait_for(qapp, lambda: idle() and GRAIN in w.state.images)
     assert "Every frame analysed" in w.analysis_label.text()
     assert w.grain_timeline.isVisibleTo(w)
-    assert "This shot" in w.tune_label.text()
+    assert "At this frame" in w.tune_label.text()
 
     w.grain_timeline.frame_clicked.emit(30)
     wait_for(qapp, lambda: idle() and w.current_index == 30)

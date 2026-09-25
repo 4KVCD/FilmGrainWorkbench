@@ -180,14 +180,26 @@ class T35Template:
         return value.to_bytes(len(self.payload), "big")
 
 
-def picture_seed(base_seed: int, picture_index: int) -> int:
-    """Grain seed for the picture shown at ``picture_index`` (never zero).
+LIBAOM_SEED = 7391
+LIBAOM_SEED_STEP = 3381
+_seed_sequences: dict[int, list[int]] = {}
 
-    A zero seed would leave the 16-bit LFSR stuck at zero. The same function
-    is used when writing metadata and when previewing, so the preview shows
-    exactly the grain pattern a decoder will produce for that frame.
+
+def picture_seed(base_seed: int, picture_index: int) -> int:
+    """Grain seed for the picture shown at ``picture_index``, as libaom's encoder picks it.
+
+    libaom starts at the table seed (7391), adds 3381 after every shown frame
+    (16-bit wrap) and replaces 0 with 7391 (av1/encoder/encoder_utils.c). The
+    same function is used when writing and when previewing, so the preview
+    shows exactly the grain pattern a decoder will produce for that frame.
     """
-    return (base_seed + 40503 * picture_index) % 65535 + 1
+    if picture_index < 0:
+        picture_index = 0
+    seq = _seed_sequences.setdefault(base_seed & 0xFFFF, [(base_seed & 0xFFFF) or LIBAOM_SEED])
+    while len(seq) <= picture_index:
+        nxt = (seq[-1] + LIBAOM_SEED_STEP) & 0xFFFF
+        seq.append(nxt or LIBAOM_SEED)
+    return seq[picture_index]
 
 
 @dataclass

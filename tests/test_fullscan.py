@@ -1,4 +1,4 @@
-"""Every-frame analysis, time-varying parameters and per-frame writing."""
+"""Every-frame analysis (threaded libaom noise model), time-varying parameters, per-frame writing."""
 
 import subprocess
 
@@ -17,53 +17,113 @@ from afgs1wb.tuning import TimelinePlan, Tuning, scale_params
 
 from conftest import sample_params
 
+W, H = 320, 184
+
 
 @pytest.fixture
-def small_chunks(monkeypatch):
-    monkeypatch.setattr(fullscan, "CHUNK_FRAMES", 20)
+def analyzer():
+    path = fullscan.analyzer_path()
+    if not path.is_file():
+        pytest.skip("grain analyzer not built (python analyzer/build.py)")
+    return path
 
 
 @pytest.fixture
 def pair(tools, need, grainy_source, grainy_clip):
-    need("ffmpeg", "ffprobe", "noise_model")
+    need("ffmpeg", "ffprobe")
     return probe(grainy_source, tools.ffprobe), probe(grainy_clip, tools.ffprobe)
 
 
-def test_every_frame_covers_all_frames_and_resumes(tools, pair, small_chunks, tmp_path):
+@pytest.fixture
+def stacked(tools, need, grainy_source, grainy_clip, tmp_path):
+    """Source above encode, as the app feeds the analyzer."""
+    need("ffmpeg")
+    graph = ("[0:v:0]format=yuv420p10le,settb=1/24,setpts=N[s];[1:v:0]format=yuv420p10le,"
+             "settb=1/24,setpts=N[e];[s][e]vstack=inputs=2:shortest=1[o]")
+    out = tmp_path / "stack.yuv"
+    subprocess.run([tools.ffmpeg, "-v", "error", "-nostdin", "-y", "-i", str(grainy_source),
+                    "-i", str(grainy_clip), "-filter_complex", graph, "-map", "[o]",
+                    "-fps_mode", "passthrough", "-f", "rawvideo", "-pix_fmt", "yuv420p10le", str(out)],
+                   check=True)
+    return out
+
+
+def run_analyzer(analyzer, data: bytes, output, *extra):
+    result = subprocess.run([str(analyzer), "--width", str(W), "--height", str(H), "--bit-depth", "10",
+                             "--chroma", "420", "--output", str(output), *extra],
+                            input=data, capture_output=True)
+    assert result.returncode == 0, result.stderr.decode()
+    return result.stdout.decode()
+
+
+def test_threads_give_exactly_libaoms_sequential_result(analyzer, stacked, tmp_path):
+    data = stacked.read_bytes()
+    run_analyzer(analyzer, data, tmp_path / "ref.tbl", "--reference")
+    reference = (tmp_path / "ref.tbl").read_bytes()
+    assert reference.count(b"\nE ") >= 1
+    for threads in (1, 3, 16):
+        run_analyzer(analyzer, data, tmp_path / f"t{threads}.tbl", "--threads", str(threads))
+        assert (tmp_path / f"t{threads}.tbl").read_bytes() == reference, f"{threads} threads"
+
+
+def test_resumed_run_equals_uninterrupted_run(analyzer, stacked, tmp_path):
+    data = stacked.read_bytes()
+    frame = 2 * (W * H + 2 * (W // 2) * (H // 2)) * 2
+    run_analyzer(analyzer, data, tmp_path / "full.tbl", "--threads", "4")
+    # first attempt stops after 20 frames with a checkpoint every 16
+    ckpt = tmp_path / "ckpt.bin"
+    run_analyzer(analyzer, data[:20 * frame], tmp_path / "part.tbl", "--threads", "4",
+                 "--checkpoint", str(ckpt), "--checkpoint-every", "16")
+    assert fullscan.checkpoint_frame(ckpt) == 16
+    run_analyzer(analyzer, data[16 * frame:], tmp_path / "part.tbl", "--threads", "4",
+                 "--start-frame", "16", "--resume", str(ckpt), "--checkpoint", str(ckpt))
+    assert (tmp_path / "part.tbl").read_bytes() == (tmp_path / "full.tbl").read_bytes()
+
+
+def test_every_frame_covers_all_frames_and_is_reused(tools, analyzer, pair, tmp_path):
     source, encoded = pair
     progress = []
     model = fullscan.analyze_every_frame(tools, source, encoded, 0, None, tmp_path,
-                                         lambda f, m: progress.append(f), CancelToken(),
-                                         workers=3, source_hwaccel=False)
-    frames = min(encoded.frame_count, source.frame_count)
+                                         lambda f, m: progress.append(m), CancelToken(),
+                                         threads=4, source_hwaccel=False)
+    first, last = fullscan.frame_range(encoded, source, 0)
     edges = [(s.start, s.end) for s in model.segments]
-    assert edges[0][0] == 0 and edges[-1][1] == frames
-    assert all(a[1] == b[0] for a, b in zip(edges, edges[1:]))      # contiguous, no gaps
-    assert len({p.name for p in tmp_path.glob("chunk_*.tbl")}) == 3
-    assert all(s.luma_mid_sigma > 0 for s in model.segments)
-    assert not model.shifted_chunks
+    assert edges[0][0] == first and edges[-1][1] == last
+    assert all(a[1] == b[0] for a, b in zip(edges, edges[1:]))       # contiguous, no gaps
+    assert "shifted" not in model.alignment
+    assert model.sigma_values and max(model.sigma_values) > 0
+    assert (tmp_path / "done.json").exists() and not (tmp_path / "checkpoint.bin").exists()
     again = fullscan.TimelineModel.from_json(model.to_json())
     assert [(s.start, s.end) for s in again.segments] == edges
-    # a second run only reads the finished parts
-    resumed = fullscan.analyze_every_frame(tools, source, encoded, 0, None, tmp_path,
-                                           lambda *_: None, CancelToken(), workers=3)
-    assert [(s.start, s.end) for s in resumed.segments] == edges
+    reused = fullscan.analyze_every_frame(tools, source, encoded, 0, None, tmp_path,
+                                          lambda *_: None, CancelToken(), threads=4)
+    assert [(s.start, s.end) for s in reused.segments] == edges
 
 
-def test_wrong_offset_is_caught_early(tools, pair, small_chunks, tmp_path):
+def test_wrong_offset_is_caught_before_analysis(tools, analyzer, pair, tmp_path):
     source, encoded = pair
     with pytest.raises(RuntimeError, match="do not line up"):
         fullscan.analyze_every_frame(tools, source, encoded, 2, None, tmp_path, lambda *_: None,
-                                     CancelToken(), workers=2, source_hwaccel=False)
+                                     CancelToken(), threads=2, source_hwaccel=False)
+    assert not (tmp_path / "table.tbl").exists()
 
 
-def test_cancel_stops_every_frame_analysis(tools, pair, small_chunks, tmp_path):
+def test_cancel_stops_every_frame_analysis(tools, analyzer, pair, tmp_path):
     source, encoded = pair
     token = CancelToken()
     token.cancel()
     with pytest.raises(Cancelled):
         fullscan.analyze_every_frame(tools, source, encoded, 0, None, tmp_path, lambda *_: None,
-                                     token, workers=2, source_hwaccel=False)
+                                     token, threads=2, source_hwaccel=False)
+
+
+def test_seeds_follow_libaom():
+    # libaom: first frame 7391, then +3381 per shown frame (16-bit), 0 -> 7391
+    assert [picture_seed(7391, i) for i in range(3)] == [7391, 10772, 14153]
+    seq = [picture_seed(7391, i) for i in range(70000)]
+    assert 0 not in seq
+    for a, b in zip(seq, seq[1:]):
+        assert b == (((a + 3381) & 0xFFFF) or 7391)
 
 
 @pytest.mark.parametrize("strength", [0.5, 2.0, 3.5])
@@ -85,7 +145,8 @@ def test_timeline_plan_follows_segments():
     plan = TimelinePlan(model, Tuning())
     assert plan.params_at(3) is plan.params_at(9)
     later = plan.params_at(10)
-    assert [y / (1 << later.scaling_shift) for _, y in later.y_points] ==         pytest.approx([y / (1 << b.scaling_shift) for _, y in b.y_points])
+    assert [y / (1 << later.scaling_shift) for _, y in later.y_points] == \
+        pytest.approx([y / (1 << b.scaling_shift) for _, y in b.y_points])
     assert plan.params_at(29) is plan.params_at(10)
 
 
