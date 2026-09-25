@@ -31,9 +31,18 @@ class VideoInfo:
     matrix: str
     transfer: str
     primaries: str
+    start_time: float = 0.0
+    frames: int = 0
 
     @property
     def frame_count(self) -> int:
+        """Pictures in the stream: the muxer's count when known, else duration × fps.
+
+        The container duration is often the audio's, which can run past the
+        video (a cut encode reported 2,145 frames for its 2,128 pictures).
+        """
+        if self.frames > 0:
+            return self.frames
         return max(1, int(round(self.duration * float(self.fps))))
 
     @property
@@ -105,7 +114,9 @@ def probe(path: str | Path, ffprobe: str, cancel: CancelToken | None = None) -> 
     if fps <= 0:
         raise ToolError(f"{path.name}: frame rate unknown")
     fps = fps.limit_denominator(1001000)
-    duration = float(s.get("duration") or data.get("format", {}).get("duration") or 0)
+    tags = {k.upper(): v for k, v in (s.get("tags") or {}).items()}
+    duration = float(s.get("duration") or _tag_seconds(tags.get("DURATION"))
+                     or data.get("format", {}).get("duration") or 0)
     if duration <= 0:
         raise ToolError(f"{path.name}: duration unknown")
     index = int(s["index"])
@@ -115,4 +126,27 @@ def probe(path: str | Path, ffprobe: str, cancel: CancelToken | None = None) -> 
         bit_depth=depth, subsampling_x=int(chroma != "444"), subsampling_y=int(chroma == "420"),
         duration=duration, first_pts=_first_presentation_time(ffprobe, path, index, cancel),
         color_range=s.get("color_range", "tv") or "tv", matrix=s.get("color_space", "") or "",
-        transfer=s.get("color_transfer", "") or "", primaries=s.get("color_primaries", "") or "")
+        transfer=s.get("color_transfer", "") or "", primaries=s.get("color_primaries", "") or "",
+        start_time=float(data.get("format", {}).get("start_time") or 0),
+        frames=_frame_count(s, tags))
+
+
+def _tag_seconds(value: str | None) -> float:
+    """Matroska statistics DURATION tag ("01:29:04.955000000") in seconds."""
+    match = re.fullmatch(r"(\d+):(\d+):(\d+(?:\.\d+)?)", (value or "").strip())
+    if not match:
+        return 0.0
+    h, m, sec = match.groups()
+    return int(h) * 3600 + int(m) * 60 + float(sec)
+
+
+def _frame_count(stream: dict, tags: dict) -> int:
+    """Exact picture count from the stream header or mkvmerge's statistics tags."""
+    values = [stream.get("nb_frames")] + [v for k, v in tags.items() if k.startswith("NUMBER_OF_FRAMES")]
+    for value in values:
+        try:
+            if int(value) > 0:
+                return int(value)
+        except (TypeError, ValueError):
+            pass
+    return 0

@@ -4,11 +4,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import re
 
 import numpy as np
 
 from .probe import VideoInfo
-from .tools import CancelToken, run
+from .tools import CancelToken, run, run_with_log
 
 
 @dataclass(frozen=True)
@@ -85,17 +86,38 @@ def _filters(info: VideoInfo, target: Geometry, crop: Crop | None) -> str:
     return ",".join(parts)
 
 
+def seek_args(info: VideoInfo, index: int) -> list[str]:
+    """Input options that make ffmpeg start exactly at frame ``index``; use with -copyts.
+
+    The seek goes to half a frame before the frame on the file's own timeline
+    and accurate seeking drops everything earlier. With -copyts ffmpeg moves
+    that cut-off later by the file's start time, so it is taken off here: a
+    cut encode starting at 0.626 s otherwise returned frame 506 for 491.
+    """
+    seconds = info.first_pts + (index - 0.5) / float(info.fps) - info.start_time
+    return ["-seek_timestamp", "1", "-ss", f"{seconds:.6f}"]
+
+
 def _command(ffmpeg: str, info: VideoInfo, index: int, count: int, target: Geometry,
-             crop: Crop | None, output: str) -> list[str]:
-    # Seek to half a frame before the wanted frame on the absolute timeline;
-    # accurate seeking then drops everything earlier, so the first frame
-    # returned is exactly ``index`` even if timestamps are rounded to 1 ms.
-    seconds = info.first_pts + (index - 0.5) / float(info.fps)
-    return [ffmpeg, "-v", "error", "-nostdin", "-y", "-seek_timestamp", "1",
-            "-ss", f"{max(0.0, seconds):.6f}", "-i", str(info.path),
+             crop: Crop | None, output: str, with_times: bool = False) -> list[str]:
+    # -fps_mode passthrough stops ffmpeg duplicating or dropping frames to
+    # "fix" timestamps that are rounded to 1 ms (it did, and shifted every
+    # later frame by one); -copyts keeps the original timestamps so each
+    # frame's index is known.
+    filters = _filters(info, target, crop) + (",showinfo" if with_times else "")
+    return [ffmpeg, "-hide_banner", "-v", "info" if with_times else "error", "-nostdin", "-y",
+            "-copyts", *seek_args(info, index), "-i", str(info.path),
             "-map", f"0:{info.stream_index}", "-frames:v", str(count),
-            "-an", "-sn", "-dn", "-vf", _filters(info, target, crop),
+            "-an", "-sn", "-dn", "-vf", filters, "-fps_mode", "passthrough",
             "-f", "rawvideo", "-pix_fmt", target.pix_fmt, output]
+
+
+_PTS_TIME = re.compile(r"Parsed_showinfo.*? pts_time:\s*(-?[0-9.]+)")
+
+
+def frame_index(info: VideoInfo, seconds: float) -> int:
+    """Index of the frame shown at ``seconds`` on the file's absolute timeline."""
+    return int(round((seconds - info.first_pts) * float(info.fps)))
 
 
 def split_planes(buffer: bytes | np.ndarray, geometry: Geometry) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -112,16 +134,24 @@ def split_planes(buffer: bytes | np.ndarray, geometry: Geometry) -> tuple[np.nda
 def read_frames(ffmpeg: str, info: VideoInfo, index: int, count: int,
                 cancel: CancelToken | None = None, target: Geometry | None = None,
                 crop: Crop | None = None) -> list[Frame]:
-    """Decode ``count`` consecutive frames starting at ``index`` (one seek)."""
+    """Decode up to ``count`` frames starting at ``index`` (one seek).
+
+    Each Frame carries its true index, taken from its timestamp: near the start
+    of a trimmed file the first frames may not be decodable, so the result can
+    start later than ``index``.
+    """
     target = target or Geometry.of(info)
-    data = run(_command(ffmpeg, info, index, count, target, crop, "pipe:1"), cancel)
+    data, log = run_with_log(_command(ffmpeg, info, index, count, target, crop, "pipe:1",
+                                      with_times=True), cancel)
     n = len(data) // target.frame_bytes
     if n == 0:
         raise RuntimeError(f"{info.path.name}: frame {index} could not be decoded")
+    times = [float(t) for t in _PTS_TIME.findall(log)]
     frames = []
     for k in range(n):
         y, u, v = split_planes(data[k * target.frame_bytes:(k + 1) * target.frame_bytes], target)
-        frames.append(Frame(index + k, y.copy(), u.copy(), v.copy(), target))
+        true_index = frame_index(info, times[k]) if k < len(times) else index + k
+        frames.append(Frame(true_index, y.copy(), u.copy(), v.copy(), target))
     return frames
 
 

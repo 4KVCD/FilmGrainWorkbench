@@ -169,7 +169,7 @@ def write_afgs1_mkv(tools: Tools, encoded: VideoInfo, output: str | Path,
                     if packets < 64:
                         sei_types |= prefix_sei_types(bytes(packet), length_size)
                     data, is_picture = insert_t35(bytes(packet), length_size, template_for(
-                        max(0, index)).for_seed(picture_seed(base_seed, index)))
+                        max(0, index)).for_seed(picture_seed(base_seed, max(0, index))))
                     pictures += is_picture
                     duration = int(round(float(packet.duration * time_base) * 1000)) if packet.duration else 0
                     writer.write(data, int(round(seconds * 1000)), packet.is_keyframe, duration)

@@ -32,7 +32,7 @@ import numpy as np
 
 from . import synth
 from .analysis import check_alignment
-from .frames import Crop, Geometry, _filters, luma_planes, read_frames
+from .frames import Crop, Geometry, _filters, luma_planes, read_frames, seek_args
 from .grain_params import GrainParams, TableEntry, format_grain_table, parse_grain_table
 from .probe import VideoInfo
 from .tools import Cancelled, CancelToken, ToolError, Tools, cpu_count
@@ -81,7 +81,7 @@ class TimelineModel:
     def to_json(self) -> str:
         table = format_grain_table([TableEntry(s.start, s.end, s.params) for s in self.segments])
         return json.dumps({
-            "version": 2, "kind": "timeline", "mode": self.kind, "bit_depth": self.bit_depth,
+            "version": 3, "kind": "timeline", "mode": self.kind, "bit_depth": self.bit_depth,
             "subsampling": [self.subsampling_x, self.subsampling_y],
             "fps": [self.fps.numerator, self.fps.denominator], "frames": self.frames,
             "seconds": round(self.seconds, 1), "alignment": self.alignment,
@@ -93,7 +93,8 @@ class TimelineModel:
     @classmethod
     def from_json(cls, text: str) -> "TimelineModel":
         d = json.loads(text)
-        if d.get("kind") != "timeline" or d.get("version") != 2:
+        # Version 2 models came from reads that could land on the wrong frame.
+        if d.get("kind") != "timeline" or d.get("version") != 3:
             raise ValueError("not a grain model this version can read")
         segments = [Segment(e.start, e.end, e.params) for e in parse_grain_table(d["table_in_frames"])]
         return cls(segments, d["bit_depth"], *d["subsampling"], Fraction(*d["fps"]), d["frames"],
@@ -136,7 +137,7 @@ def cache_key(source: VideoInfo, encoded: VideoInfo, offset: int, crop: Crop | N
     for info in (source, encoded):
         st = info.path.stat()
         parts.append(f"{info.path}|{st.st_size}|{int(st.st_mtime)}")
-    parts += [str(offset), str(crop), "analyzer-v1"]
+    parts += [str(offset), str(crop), "analyzer-v2"]
     return hashlib.sha1("||".join(parts).encode()).hexdigest()[:16]
 
 
@@ -200,30 +201,54 @@ def sample_sigmas(model: TimelineModel, cancel: CancelToken) -> None:
 
 # --------------------------------------------------------------------------- preflight
 
-def preflight_alignment(tools: Tools, source: VideoInfo, encoded: VideoInfo, offset: int,
-                        crop: Crop | None, cancel: CancelToken, progress) -> list[str]:
-    """Check frame-accurate pairing at several places before hours of work."""
-    first, last = frame_range(encoded, source, offset)
-    geometry = Geometry.of(encoded)
-    places = np.linspace(first, max(first, last - PREFLIGHT_FRAMES), PREFLIGHT_PLACES).astype(int)
-    peak = float((1 << geometry.bit_depth) - 1)
-    ny = geometry.width * geometry.height
+def first_common_frame(tools: Tools, source: VideoInfo, encoded: VideoInfo, offset: int,
+                       crop: Crop | None, first: int, cancel: CancelToken) -> int:
+    """First encoded frame at or after ``first`` that both files can decode.
 
-    def luma(frames) -> np.ndarray:
-        return np.stack([f.y[::4, ::4].astype(np.float32) for f in frames])
+    A file cut from a longer one starts with leading pictures that reference
+    frames before the cut; ffmpeg drops them (a cut encode's first 15).
+    """
+    geometry = Geometry.of(encoded)
+    enc = read_frames(tools.ffmpeg, encoded, first, 1, cancel)[0].index
+    src = read_frames(tools.ffmpeg, source, first + offset, 1, cancel, geometry, crop)[0].index - offset
+    if min(enc, src) < first:
+        raise RuntimeError(f"seeking to frame {first} returned frame {min(enc, src)}")
+    return max(enc, src)
+
+
+def preflight_alignment(tools: Tools, source: VideoInfo, encoded: VideoInfo, offset: int,
+                        crop: Crop | None, cancel: CancelToken, progress,
+                        first: int | None = None) -> list[str]:
+    """Check frame-accurate pairing at several places before hours of work.
+
+    Frames are paired by their own timestamps, like the every-frame pipeline,
+    and the places stay clear of the ends, where cut files have frames that do
+    not decode. Two places at a time: each 4K check holds two decoders (~1 GB).
+    """
+    lo, last = frame_range(encoded, source, offset)
+    first = lo if first is None else first
+    geometry = Geometry.of(encoded)
+    margin = min(PREFLIGHT_FRAMES, max(0, (last - first) // 4))
+    places = np.linspace(first + margin, max(first, last - PREFLIGHT_FRAMES - margin),
+                         PREFLIGHT_PLACES).astype(int)
+    peak = float((1 << geometry.bit_depth) - 1)
 
     def check(place: int) -> str:
         s = read_frames(tools.ffmpeg, source, int(place) + offset, PREFLIGHT_FRAMES, cancel, geometry, crop)
         e = read_frames(tools.ffmpeg, encoded, int(place), PREFLIGHT_FRAMES, cancel)
-        n = min(len(s), len(e))
-        return check_alignment(luma(s[:n]), luma(e[:n]), peak)[1] if n >= 3 else "unclear"
+        by_index = {f.index - offset: f for f in s}
+        pairs = [(by_index[f.index], f) for f in e if f.index in by_index]
+        if len(pairs) < 3:
+            return "unclear"
+        src = np.stack([a.y[::4, ::4].astype(np.float32) for a, _ in pairs])
+        enc = np.stack([b.y[::4, ::4].astype(np.float32) for _, b in pairs])
+        return check_alignment(src, enc, peak)[1]
 
     verdicts: list[str] = []
-    with ThreadPoolExecutor(4) as pool:
+    with ThreadPoolExecutor(2) as pool:
         for i, verdict in enumerate(pool.map(check, places)):
             verdicts.append(verdict)
             progress(-1, f"Checking that source and encode frames line up ({i + 1} of {len(places)})…")
-    del ny
     if verdicts.count("shifted") * 2 > len(verdicts) or \
             (verdicts.count("shifted") >= 2 and verdicts.count("ok") == 0):
         raise RuntimeError(
@@ -242,16 +267,22 @@ def _pipeline_commands(tools: Tools, source: VideoInfo, encoded: VideoInfo, offs
     g = Geometry.of(encoded)
     fps = encoded.fps
     tb = f"{fps.denominator}/{fps.numerator}"
-    src_seek = source.first_pts + (start + offset - 0.5) / float(source.fps)
-    enc_seek = encoded.first_pts + (start - 0.5) / float(encoded.fps)
-    graph = (f"[0:{source.stream_index}]{_filters(source, g, crop)},settb={tb},setpts=N[s];"
-             f"[1:{encoded.stream_index}]{_filters(encoded, g, None)},settb={tb},setpts=N[e];"
+
+    # Each frame's timestamp becomes its encoded-frame number, so vstack pairs
+    # frames by time, not by arrival: a frame one decoder drops (or a file's
+    # undecodable leading pictures) costs one repeated frame instead of
+    # shifting every later pair. The analyzer numbers frames from ``start``.
+    def number(info: VideoInfo, shift: int) -> str:
+        return (f"settb={tb},setpts='round((T-{info.first_pts:.6f})*{fps.numerator}/{fps.denominator})"
+                f"{-shift:+d}'")
+    graph = (f"[0:{source.stream_index}]{_filters(source, g, crop)},{number(source, offset)}[s];"
+             f"[1:{encoded.stream_index}]{_filters(encoded, g, None)},{number(encoded, 0)}[e];"
              f"[s][e]vstack=inputs=2:shortest=1[o]")
     ffmpeg = [tools.ffmpeg, "-v", "error", "-nostdin"]
     if source_hwaccel:
         ffmpeg += ["-hwaccel", "auto"]
-    ffmpeg += ["-seek_timestamp", "1", "-ss", f"{max(0.0, src_seek):.6f}", "-i", str(source.path),
-               "-seek_timestamp", "1", "-ss", f"{max(0.0, enc_seek):.6f}", "-i", str(encoded.path),
+    ffmpeg += ["-copyts", *seek_args(source, start + offset), "-i", str(source.path),
+               *seek_args(encoded, start), "-i", str(encoded.path),
                "-filter_complex", graph, "-map", "[o]", "-frames:v", str(count),
                "-fps_mode", "passthrough", "-f", "rawvideo", "-pix_fmt", g.pix_fmt, "pipe:1"]
     chroma = {(1, 1): "420", (1, 0): "422", (0, 0): "444"}[(g.subsampling_x, g.subsampling_y)]
@@ -284,13 +315,16 @@ def analyze_every_frame(tools: Tools, source: VideoInfo, encoded: VideoInfo, off
     done_marker = work_dir / "done.json"
 
     resume_at = checkpoint_frame(checkpoint) if checkpoint.exists() and table.exists() else None
+    warnings: list[str] = []
     if done_marker.exists() and table.exists():
-        alignment = json.loads(done_marker.read_text()).get("alignment", [])
+        marker = json.loads(done_marker.read_text())
+        alignment, warnings = marker.get("alignment", []), marker.get("warnings", [])
     else:
         progress(-1, "Checking that source and encode frames line up…")
-        alignment = preflight_alignment(tools, source, encoded, offset, crop, cancel, progress)
-        start = resume_at if resume_at is not None and first <= resume_at < last else first
-        resume = start != first
+        first = first_common_frame(tools, source, encoded, offset, crop, first, cancel)
+        alignment = preflight_alignment(tools, source, encoded, offset, crop, cancel, progress, first)
+        resume = resume_at is not None and first < resume_at < last
+        start = resume_at if resume else first
         count = last - start
         ffmpeg_cmd, analyzer_cmd = _pipeline_commands(
             tools, source, encoded, offset, crop, start, count, source_hwaccel, analyzer,
@@ -310,6 +344,8 @@ def analyze_every_frame(tools: Tools, source: VideoInfo, encoded: VideoInfo, off
         done = start
         try:
             for line in iter(worker.stdout.readline, b""):
+                if line.startswith(b"D "):
+                    done = int(line.split()[1])
                 if not line.startswith(b"P "):
                     continue
                 done = int(line.split()[1])
@@ -338,7 +374,15 @@ def analyze_every_frame(tools: Tools, source: VideoInfo, encoded: VideoInfo, off
                                                         f"exit code {worker.returncode}"))
         if decoder.returncode != 0:
             raise ToolError("ffmpeg failed while decoding: " + " / ".join(list(dec_err)[-3:]))
-        done_marker.write_text(json.dumps({"alignment": alignment}))
+        if last - done > max(2, int(float(encoded.fps))):
+            # The encode ends earlier than its header says: the last frames keep
+            # the final segment's grain. Anything shorter is rounding of the length.
+            warnings.append(f"Decoding stopped at frame {done:,} of {last:,}; the frames after it "
+                            "use the last measured grain.")
+        if first > 0:
+            warnings.append(f"Frames before {first:,} could not be decoded in both files; they use "
+                            "the first measured grain.")
+        done_marker.write_text(json.dumps({"alignment": alignment, "warnings": warnings}))
         checkpoint.unlink(missing_ok=True)
 
     progress(0.99, "Summarising the grain over time…")
@@ -347,7 +391,7 @@ def analyze_every_frame(tools: Tools, source: VideoInfo, encoded: VideoInfo, off
     geometry = Geometry.of(encoded)
     model = TimelineModel(segments, geometry.bit_depth, geometry.subsampling_x, geometry.subsampling_y,
                           encoded.fps, encoded.frame_count, time.perf_counter() - started,
-                          "every-frame", alignment=alignment)
+                          "every-frame", alignment=alignment, notes={"warnings": warnings})
     sample_sigmas(model, cancel)
     return model
 

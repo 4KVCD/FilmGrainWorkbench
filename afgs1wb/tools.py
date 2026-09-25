@@ -56,9 +56,9 @@ class CancelToken:
             self._processes.discard(process)
 
 
-def run(command: list[str], cancel: CancelToken | None = None, *,
-        stdin: bytes | None = None) -> bytes:
-    """Run a command and return its stdout; raise ToolError with stderr on failure."""
+def run_with_log(command: list[str], cancel: CancelToken | None = None, *,
+                 stdin: bytes | None = None) -> tuple[bytes, str]:
+    """Run a command; return (stdout, stderr text). Raise ToolError on failure."""
     if cancel:
         cancel.check()
     try:
@@ -76,11 +76,18 @@ def run(command: list[str], cancel: CancelToken | None = None, *,
             cancel._untrack(process)
     if cancel and cancel.cancelled:
         raise Cancelled()
+    message = err.decode("utf-8", "replace")
     if process.returncode != 0:
-        message = err.decode("utf-8", "replace").strip()
-        tail = "\n".join(message.splitlines()[-12:])
+        lines = [l for l in message.strip().splitlines() if "Parsed_showinfo" not in l]
+        tail = "\n".join(lines[-12:])
         raise ToolError(f"{Path(command[0]).name} failed (exit code {process.returncode}):\n{tail}")
-    return out
+    return out, message
+
+
+def run(command: list[str], cancel: CancelToken | None = None, *,
+        stdin: bytes | None = None) -> bytes:
+    """Run a command and return its stdout; raise ToolError with stderr on failure."""
+    return run_with_log(command, cancel, stdin=stdin)[0]
 
 
 def run_text(command: list[str], cancel: CancelToken | None = None) -> str:

@@ -830,6 +830,8 @@ class MainWindow(QMainWindow):
             if model.alignment.count("shifted"):
                 text += (f" ⚠ {model.alignment.count('shifted')} of {len(model.alignment)} alignment "
                          "checks matched a neighbouring frame better (check the offset).")
+            for warning in model.notes.get("warnings", []):
+                text += f" ⚠ {warning}"
             self.grain_timeline.show()
         if loaded_from:
             text = f"Loaded from {loaded_from}. " + text
