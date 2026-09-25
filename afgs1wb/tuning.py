@@ -232,3 +232,28 @@ class TimelinePlan(GrainPlan):
     @property
     def clipped(self) -> bool:
         return self._any_clipped
+
+
+class FramePlan(GrainPlan):
+    """Parameters estimated one frame at a time (the viewer's live estimate), scaled on demand.
+
+    ``params_at`` returns None for a frame that has not been estimated yet.
+    """
+
+    def __init__(self, estimates: dict[int, GrainParams], tuning: Tuning, subsampled_420: bool) -> None:
+        self.estimates = estimates
+        self.tuning = tuning
+        self._420 = subsampled_420
+        self._cache: dict[int, tuple[GrainParams, bool]] = {}
+
+    def params_at(self, index: int) -> GrainParams | None:
+        raw = self.estimates.get(index)
+        if raw is None:
+            return None
+        cached = self._cache.get(index)
+        if cached is None or cached[0] is not raw:
+            cached = self._cache[index] = (raw, *scale_params(raw, self.tuning, self._420))
+        return cached[1]
+
+    def clipped_at(self, index: int) -> bool:
+        return self.params_at(index) is not None and self._cache[index][2]

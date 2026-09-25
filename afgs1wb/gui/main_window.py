@@ -1,4 +1,4 @@
-"""Main window: videos -> analyse -> tune -> write, with a large frame viewer."""
+"""Main window: videos -> tune -> write, with a large frame viewer that estimates the grain live."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ import time
 import numpy as np
 from PySide6.QtCore import QSettings, QStandardPaths, Qt, QTimer, QUrl
 from PySide6.QtGui import QDesktopServices, QImage, QKeySequence, QShortcut
-from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QFileDialog, QFormLayout,
+from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QFileDialog, QFormLayout,
                                QFrame, QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit,
                                QMainWindow, QMessageBox, QPlainTextEdit, QProgressBar,
                                QPushButton, QScrollArea, QSizePolicy, QSlider, QSpinBox,
@@ -21,15 +21,16 @@ from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QFileDialog, 
 
 from .. import display, synth
 from ..afgs1 import picture_seed
-from ..analysis import AnalysisSettings, GrainModel, analyze, detect_offset, entry_sigmas
+from ..analysis import detect_offset, entry_sigmas
 from ..fullscan import (TimelineModel, analyze_every_frame, analyzer_path, cache_key,
-                        checkpoint_frame, default_threads, estimate_seconds, quick_timeline)
+                        checkpoint_frame, default_threads, estimate_frame, estimate_seconds)
 from ..frames import Crop, Frame, Geometry, read_frame, read_frames, source_crop_for
 from ..grain_params import TableEntry, format_grain_table
 from ..mux import WriteReport, write_afgs1_mkv
 from ..probe import VideoInfo, probe
 from ..tools import Tools, ToolError, detect_tools, keep_awake
-from ..tuning import GrainPlan, TimelinePlan, Tuning, build_params, sigma_in_8bit_units
+from ..grain_params import GrainParams
+from ..tuning import FramePlan, GrainPlan, TimelinePlan, Tuning, scale_params, sigma_in_8bit_units
 from .curves import CurvePlot
 from .jobs import Job
 from .timeline import GrainTimeline
@@ -73,7 +74,8 @@ class MainWindow(QMainWindow):
         self.source: VideoInfo | None = None
         self.encoded: VideoInfo | None = None
         self.crop: Crop | None = None
-        self.model: TimelineModel | None = None
+        self.model: TimelineModel | None = None          # the every-frame analysis, once there is one
+        self.estimates: dict[int, GrainParams] = {}      # live single-frame estimates otherwise
         self.plan: GrainPlan | None = None
         self.written: Written | None = None
         self.job: Job | None = None
@@ -95,6 +97,8 @@ class MainWindow(QMainWindow):
         self.frame_timer.timeout.connect(lambda: self._request_frame(self.current_index))
         self.tune_timer = QTimer(self, singleShot=True, interval=150)
         self.tune_timer.timeout.connect(self._retune)
+        self.offset_timer = QTimer(self, singleShot=True, interval=400)
+        self.offset_timer.timeout.connect(self._offset_changed)
         QTimer.singleShot(0, self._startup)
 
     # ------------------------------------------------------------------ layout
@@ -132,62 +136,23 @@ class MainWindow(QMainWindow):
         self.pair_note = QLabel()
         self.pair_note.setWordWrap(True)
         self.pair_note.setObjectName("info")
-        grid.addWidget(self.pair_note, 4, 0, 1, 3)
-        side.addWidget(files)
-
-        # 2 analyse
-        analysis = QGroupBox("2 · Analyse grain")
-        form = QFormLayout(analysis)
-        runs_row = QHBoxLayout()
-        self.runs_spin = QSpinBox(minimum=2, maximum=64, value=16)
-        self.frames_spin = QSpinBox(minimum=3, maximum=24, value=8)
-        self.runs_spin.setToolTip("How many places in the video to sample. More places = a more "
-                                  "representative model, longer analysis.")
-        self.frames_spin.setToolTip("Consecutive frames decoded at each place. Decoding a run costs "
-                                    "about the same as decoding one frame, so 8 is cheap.")
-        runs_row.addWidget(self.runs_spin)
-        runs_row.addWidget(QLabel("places ×"))
-        runs_row.addWidget(self.frames_spin)
-        runs_row.addWidget(QLabel("frames"))
-        runs_row.addStretch(1)
-        self.quick_options = QWidget()
-        self.quick_options.setLayout(runs_row)
-        runs_row.setContentsMargins(0, 0, 0, 0)
-        form.addRow("Sample", self.quick_options)
-        self.estimate_label = QLabel()
-        self.estimate_label.setWordWrap(True)
-        self.estimate_label.setObjectName("info")
-        form.addRow("", self.estimate_label)
         offset_row = QHBoxLayout()
         self.offset_spin = QSpinBox(minimum=-100000, maximum=100000, value=0)
         self.offset_spin.setToolTip("Encoded frame N shows source frame N + offset. Leave at 0 unless "
                                     "the encode was trimmed or has extra frames.")
+        self.offset_spin.valueChanged.connect(lambda _: self.offset_timer.start())
         self.detect_button = QPushButton("Detect")
         self.detect_button.setToolTip("Find the offset by matching frames at three places.")
         self.detect_button.clicked.connect(self._detect_offset)
         offset_row.addWidget(self.offset_spin, 1)
         offset_row.addWidget(self.detect_button)
-        form.addRow("Frame offset", offset_row)
-        self.analyse_button = QPushButton("Analyse grain")
-        self.analyse_button.setProperty("primary", True)
-        self.analyse_button.setToolTip("Sample a few places to preview and tune the grain. Writing the "
-                                       "MKV analyses every frame itself.")
-        self.analyse_button.clicked.connect(self._analyse)
-        form.addRow(self.analyse_button)
-        self.analysis_label = QLabel("Not analysed yet.")
-        self.analysis_label.setWordWrap(True)
-        self.analysis_label.setObjectName("info")
-        form.addRow(self.analysis_label)
-        self.runs_combo = QComboBox()
-        self.runs_combo.setToolTip("Jump the viewer to one of the sampled places.")
-        self.runs_combo.activated.connect(self._jump_to_run)
-        form.addRow("Go to", self.runs_combo)
-        for spin in (self.runs_spin, self.frames_spin):
-            spin.valueChanged.connect(self._update_estimate)
-        side.addWidget(analysis)
+        grid.addWidget(QLabel("Frame offset"), 4, 0)
+        grid.addLayout(offset_row, 4, 1, 1, 2)
+        grid.addWidget(self.pair_note, 5, 0, 1, 3)
+        side.addWidget(files)
 
-        # 3 tune
-        tune = QGroupBox("3 · Tune grain")
+        # 2 tune
+        tune = QGroupBox("2 · Tune grain")
         tform = QFormLayout(tune)
         self.plot = CurvePlot()
         tform.addRow(self.plot)
@@ -219,21 +184,17 @@ class MainWindow(QMainWindow):
         reset = QPushButton("Reset")
         reset.setToolTip("Back to 100 % luma and chroma strength.")
         reset.clicked.connect(self._reset_tuning)
-        self.save_model_button = QPushButton("Save model…")
-        self.save_model_button.clicked.connect(self._save_model)
-        load_model = QPushButton("Load model…")
-        load_model.clicked.connect(self._load_model_file)
         self.export_table_button = QPushButton("Export grain table…")
         self.export_table_button.setToolTip("Save the tuned parameters as an AOM film grain table "
                                             "(usable with aomenc / SVT-AV1 --fgs-table).")
         self.export_table_button.clicked.connect(self._export_table)
-        for w in (reset, self.save_model_button, load_model, self.export_table_button):
+        for w in (reset, self.export_table_button):
             model_row.addWidget(w)
         tform.addRow(model_row)
         side.addWidget(tune)
 
-        # 4 write
-        write = QGroupBox("4 · Write")
+        # 3 write
+        write = QGroupBox("3 · Write")
         wgrid = QGridLayout(write)
         self.output_edit = QLineEdit()
         self.output_edit.setPlaceholderText("Output .mkv")
@@ -262,6 +223,11 @@ class MainWindow(QMainWindow):
         self.write_estimate_label.setWordWrap(True)
         self.write_estimate_label.setObjectName("info")
         wgrid.addWidget(self.write_estimate_label, 2, 0, 1, 3)
+        self.analysis_label = QLabel()
+        self.analysis_label.setWordWrap(True)
+        self.analysis_label.setObjectName("info")
+        self.analysis_label.hide()
+        wgrid.addWidget(self.analysis_label, 6, 0, 1, 3)
         self.write_button = QPushButton("Write MKV with grain metadata")
         self.write_button.setProperty("primary", True)
         self.write_button.clicked.connect(self._write)
@@ -435,8 +401,6 @@ class MainWindow(QMainWindow):
             self.resize(1600, 980)
         if s.value("window/splitter"):
             self.splitter.restoreState(s.value("window/splitter"))
-        self.runs_spin.setValue(int(s.value("analysis/runs", 16)))
-        self.frames_spin.setValue(int(s.value("analysis/frames", 8)))
         self.luma_spin.setValue(int(s.value("tune/luma", 100)))
         self.chroma_spin.setValue(int(s.value("tune/chroma", 100)))
         self.seed_spin.setValue(int(s.value("tune/seed", 7391)))
@@ -453,8 +417,6 @@ class MainWindow(QMainWindow):
             s.setValue(f"tools/{name}", getattr(self.tools, name))
         s.setValue("files/source", self.source_edit.text())
         s.setValue("files/encoded", self.encoded_edit.text())
-        s.setValue("analysis/runs", self.runs_spin.value())
-        s.setValue("analysis/frames", self.frames_spin.value())
         s.setValue("analysis/threads", self.workers_spin.value())
         s.setValue("analysis/gpu", self.gpu_check.isChecked())
         s.setValue("tune/luma", self.luma_spin.value())
@@ -533,6 +495,7 @@ class MainWindow(QMainWindow):
 
     def _pair_changed(self) -> None:
         self.model = self.plan = self.written = None
+        self.estimates = {}
         self.frame_cache.clear()
         self.crop = None
         notes = []
@@ -565,6 +528,7 @@ class MainWindow(QMainWindow):
         self.pair_note.setText("\n".join(notes))
         self.pair_note.setVisible(bool(notes))
         self._clear_model_ui()
+        self._rebuild_plan()
         if src and enc:
             self._autoload_model()
         if enc:
@@ -584,14 +548,8 @@ class MainWindow(QMainWindow):
     def _update_enabled(self) -> None:
         busy = self._busy()
         pair = bool(self.source and self.encoded)
-        for w in (self.source_edit, self.encoded_edit, self.runs_spin, self.frames_spin, self.offset_spin,
-                  self.workers_spin, self.gpu_check):
+        for w in (self.source_edit, self.encoded_edit, self.offset_spin, self.workers_spin, self.gpu_check):
             w.setEnabled(not busy)
-        ready = not self.tools.missing("noise_model")
-        self.analyse_button.setEnabled(pair and not busy and not self.tools.missing("ffmpeg") and ready)
-        self.analyse_button.setToolTip(
-            "Sample a few places to preview and tune the grain. Writing the MKV analyses every frame "
-            "itself." if ready else "Needs AOM noise_model (Settings → External programs).")
         self.detect_button.setEnabled(pair and not busy)
         has_model = self.model is not None
         why = ("" if pair else "Choose the source and the encoded video first.") or \
@@ -604,11 +562,9 @@ class MainWindow(QMainWindow):
                                             "writes the MKV with the strength set above.")
         self.verify_button.setEnabled(bool(self.written) and not busy)
         self.open_folder_button.setEnabled(bool(self.written))
-        self.save_model_button.setEnabled(has_model)
         self.export_table_button.setEnabled(has_model)
-        self.runs_combo.setEnabled(has_model and self.runs_combo.count() > 0)
         for mode, button in self.mode_buttons.items():
-            button.setEnabled(mode in self.state.images or (mode in (GRAIN, GRAIN_ONLY) and has_model))
+            button.setEnabled(mode in self.state.images or (mode in (GRAIN, GRAIN_ONLY) and pair))
 
     def _fullscan_dir(self) -> Path | None:
         if not (self.source and self.encoded):
@@ -617,13 +573,6 @@ class MainWindow(QMainWindow):
         return self.data_dir / "every-frame" / key
 
     def _update_estimate(self) -> None:
-        frames = self.runs_spin.value() * self.frames_spin.value()
-        text = f"{frames} frames"
-        if self.encoded:
-            scale = self.encoded.width * self.encoded.height / (3840 * 2160)
-            seconds = 6 + 0.38 * frames * scale
-            text += f" · about {seconds:.0f} s" if seconds < 90 else f" · about {seconds / 60:.1f} min"
-        self.estimate_label.setText(text + " · a sample for previewing and tuning")
         self.write_estimate_label.setText(self._every_frame_text())
 
     def _every_frame_state(self) -> tuple[str, int | None]:
@@ -720,99 +669,55 @@ class MainWindow(QMainWindow):
             text = f"Detected offset {offset:+d} frames ({quality})."
             self.status_label.setText(text)
             self._log(text)
-            self.frame_cache.clear()
-            self._go_to(self.current_index, force=True)
+            self.offset_timer.stop()
+            self._offset_changed()
 
         self._start_job("Offset detection", work, done, "Detecting the frame offset…")
 
-    def _analyse(self) -> None:
-        settings = AnalysisSettings(self.runs_spin.value(), self.frames_spin.value(),
-                                    self.offset_spin.value(), self.crop)
-        src, enc, tools = self.source, self.encoded, self.tools
-        work_dir = Path(QStandardPaths.writableLocation(QStandardPaths.StandardLocation.TempLocation))
-
-        def work(token, progress):
-            return analyze(tools, src, enc, settings, progress, token, work_dir)
-
-        self._start_job("Analysis", work, self._analysis_done,
-                        f"Analysing {settings.runs} places × {settings.frames_per_run} frames…")
+    def _offset_changed(self) -> None:
+        """Other source frames are paired with the encode now: estimate and show them again."""
+        self.estimates.clear()
+        self._rebuild_plan()
+        for key in [k for k in self.frame_cache if k[0] == "src"]:
+            del self.frame_cache[key]
+        self._update_estimate()
+        self._go_to(self.current_index, force=True)
 
     confirm_long_runs = True
 
-    def _analysis_done(self, model) -> None:
-        if isinstance(model, GrainModel):
-            # Quick sample: one parameter set for the whole video, as a one-segment timeline.
-            params = build_params(model, Tuning()).params
-            scale = 1 << (model.bit_depth - 8)
-            runs = [{"start": r.start, "frames": r.frames, "psnr": round(r.psnr, 2), "alignment": r.alignment,
-                     "luma8": None if r.luma_sigma is None else [round(float(v) / scale, 3) for v in r.luma_sigma]}
-                    for r in model.runs]
-            model = quick_timeline(params, self.encoded, model.seconds, {"runs": runs})
-        self._set_model(model)
-        self._store_model_cache(model)
-        h, rem = divmod(int(model.seconds), 3600)
-        took = f"{h} h {rem // 60:02d} min" if h else f"{model.seconds:.0f} s"
-        self.status_label.setText(f"Analysis finished in {took}.")
-        self._log(self.analysis_label.text())
-
     def _set_model(self, model: TimelineModel, loaded_from: str | None = None) -> None:
+        """Use an every-frame analysis for the preview (it is what Write puts in the file)."""
         self.model = model
         self.written = None
-        self.runs_combo.clear()
         scale = 1 << (model.bit_depth - 8)
         h, rem = divmod(int(model.seconds), 3600)
         took = (f" Took {h} h {rem // 60:02d} min." if model.seconds >= 3600 else
                 f" Took {model.seconds / 60:.0f} min." if model.seconds >= 60 else
                 f" Took {model.seconds:.0f} s." if model.seconds else "")
-        if model.kind == "quick":
-            runs = model.notes.get("runs", [])
-            ok = [r for r in runs if r["alignment"] in ("ok", "unclear") and r["psnr"] > 0]
-            excluded = len(runs) - len(ok)
-            mid = (model.sigma_values[0] / scale) if model.sigma_values else 0.0
-            sampled = sum(r.get("frames", 0) for r in runs)
-            text = (f"Quick sample, not the whole video: {len(runs)} places"
-                    + (f" ({sampled:,} frames)" if sampled else "")
-                    + f", one grain setting for all {model.frames:,} frames. "
-                    f"{len(ok)} of {len(runs)} places used"
-                    + (f" ({excluded} excluded: frames did not line up)" if excluded else "")
-                    + (f", median match {np.median([r['psnr'] for r in ok]):.1f} dB" if ok else "")
-                    + f". The encode lost grain of σ ≈ {mid:.2f} (8-bit) at mid-grey.{took}")
-            fps = float(model.fps)
-            for r in runs:
-                mark = "" if r["alignment"] in ("ok", "unclear") else "  (excluded)"
-                self.runs_combo.addItem(f"{_timecode(r['start'] / fps)} · frame {r['start']:,} · "
-                                        f"{r['psnr']:.1f} dB{mark}", r["start"])
-            self.grain_timeline.hide()
-        else:
-            values = np.array(model.sigma_values or [0.0]) / scale
-            text = (f"Every frame analysed: {model.frames:,} frames, {len(model.segments):,} parameter "
-                    f"changes. Grain σ at mid-grey across the film: median {np.median(values):.2f}, "
-                    f"5–95 % {np.percentile(values, 5):.2f}–{np.percentile(values, 95):.2f} (8-bit).{took}")
-            if model.alignment.count("shifted"):
-                text += (f" ⚠ {model.alignment.count('shifted')} of {len(model.alignment)} alignment "
-                         "checks matched a neighbouring frame better (check the offset).")
-            for warning in model.notes.get("warnings", []):
-                text += f" ⚠ {warning}"
-            self.grain_timeline.show()
+        values = np.array(model.sigma_values or [0.0]) / scale
+        text = (f"Every frame analysed: {model.frames:,} frames, {len(model.segments):,} parameter "
+                f"changes. Grain σ at mid-grey across the film: median {np.median(values):.2f}, "
+                f"5–95 % {np.percentile(values, 5):.2f}–{np.percentile(values, 95):.2f} (8-bit).{took}")
+        if model.alignment.count("shifted"):
+            text += (f" ⚠ {model.alignment.count('shifted')} of {len(model.alignment)} alignment "
+                     "checks matched a neighbouring frame better (check the offset).")
+        for warning in model.notes.get("warnings", []):
+            text += f" ⚠ {warning}"
         if loaded_from:
             text = f"Loaded from {loaded_from}. " + text
         self.analysis_label.setText(text)
+        self.analysis_label.show()
+        self.grain_timeline.show()
         self._retune()
         self._update_enabled()
 
     def _clear_model_ui(self) -> None:
         self.grain_timeline.hide()
-        self.analysis_label.setText("Not analysed yet.")
-        self.runs_combo.clear()
-        self.plot.clear("Analyse the grain to see its strength curve.")
+        self.analysis_label.hide()
+        self.plot.clear("The grain of the frame shown is estimated when it loads.")
         self.tune_label.setText("")
         self.write_label.setText("")
         self.state.update_images({GRAIN: None, GRAIN_ONLY: None})
-
-    def _jump_to_run(self, index: int) -> None:
-        start = self.runs_combo.itemData(index)
-        if start is not None:
-            self._go_to(int(start) + self.frames_spin.value() // 2)
 
     # model cache: reopening the same pair restores its analysis
     def _cache_path(self) -> Path | None:
@@ -838,41 +743,14 @@ class MainWindow(QMainWindow):
         path = self._cache_path()
         if not path:
             return
-        for suffix, label in ((".every-frame.json", "the previous every-frame analysis"),
-                              (".quick.json", "the previous analysis of these files")):
-            candidate = path.with_suffix(suffix)
-            if candidate.is_file():
-                try:
-                    self._set_model(self._model_from_json(candidate.read_text(encoding="utf-8")),
-                                    loaded_from=label)
-                    return
-                except (ValueError, KeyError):
-                    continue
-
-    def _save_model(self) -> None:
-        if not self.model:
-            return
-        start = str(self.encoded.path.with_suffix(".grainmodel.json")) if self.encoded else ""
-        path, _ = QFileDialog.getSaveFileName(self, "Save grain model", start, "Grain model (*.json)")
-        if path:
-            Path(path).write_text(self.model.to_json(), encoding="utf-8")
-            self._log(f"Saved model to {path}")
-
-    def _load_model_file(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(self, "Load grain model", "", "Grain model (*.json)")
-        if not path:
-            return
-        try:
-            model = self._model_from_json(Path(path).read_text(encoding="utf-8"))
-        except (ValueError, KeyError, OSError) as exc:
-            QMessageBox.warning(self, "Could not load model", str(exc))
-            return
-        if self.encoded and (model.bit_depth, model.subsampling_x, model.subsampling_y) != (
-                self.encoded.bit_depth, self.encoded.subsampling_x, self.encoded.subsampling_y):
-            QMessageBox.warning(self, "Model does not fit", "The model was made for a different bit depth "
-                                "or chroma format than the loaded encode.")
-            return
-        self._set_model(model, loaded_from=Path(path).name)
+        candidate = path.with_suffix(".every-frame.json")
+        if candidate.is_file():
+            try:
+                model = self._model_from_json(candidate.read_text(encoding="utf-8"))
+            except (ValueError, KeyError):
+                return
+            if model.kind == "every-frame":
+                self._set_model(model, loaded_from="the previous every-frame analysis")
 
     def _export_table(self) -> None:
         if not self.plan:
@@ -892,20 +770,29 @@ class MainWindow(QMainWindow):
                       self.overlap_check.isChecked(), self.clip_check.isChecked(), self.seed_spin.value())
 
     def _tuning_changed(self, *_) -> None:
-        if self.model:
+        if self.encoded:
             self.tune_timer.start()
 
     def _reset_tuning(self) -> None:
         self.luma_spin.setValue(100)
         self.chroma_spin.setValue(100)
 
+    def _rebuild_plan(self) -> None:
+        """Every-frame parameters when analysed, else the live per-frame estimates, at the set strength."""
+        enc, tuning = self.encoded, self._tuning()
+        if self.model:
+            self.plan = TimelinePlan(self.model, tuning)
+        elif enc:
+            self.plan = FramePlan(self.estimates, tuning, (enc.subsampling_x, enc.subsampling_y) == (1, 1))
+        else:
+            self.plan = None
+
     def _retune(self) -> None:
-        if not self.model:
+        if not self.encoded:
             return
-        tuning = self._tuning()
-        m = self.model
-        self.plan = TimelinePlan(m, tuning)
-        if m.kind != "quick":
+        self._rebuild_plan()
+        tuning, m = self._tuning(), self.model
+        if m:
             scale = 1 << (m.bit_depth - 8)
             self.grain_timeline.set_data(m.frames, np.array(m.sigma_frames),
                                          np.array(m.sigma_values) / scale * tuning.luma_strength,
@@ -917,28 +804,37 @@ class MainWindow(QMainWindow):
 
     def _update_segment_plot(self) -> None:
         """Brightness curves of the parameters in use at the current frame."""
-        if not (self.model and self.plan):
+        if not (self.plan and self.encoded):
             return
-        m, tuning = self.model, self._tuning()
-        params = self.plan.params_at(self.current_index)
-        y, cb, cr = entry_sigmas(params, m.bit_depth, m.subsampling_x, m.subsampling_y)
-        to8 = lambda a: sigma_in_8bit_units(a, m.bit_depth)
-        mid = float(to8(y)[128])
-        if m.kind == "quick":
-            runs = [np.array(r["luma8"]) for r in m.notes.get("runs", []) if r.get("luma8")]
-            self.plot.set_data(to8(y), to8(cb), to8(cr), runs)
-            text = (f"Mid-grey luma grain σ {mid:.2f} (8-bit) at {tuning.luma_strength * 100:.0f} % strength · "
-                    f"{len(params.y_points)} luma / {len(params.cb_points)} chroma points · "
-                    f"scaling shift {params.scaling_shift}")
-        else:
-            segment = m.segment_at(self.current_index)
-            self.plot.set_data(to8(y), to8(cb), to8(cr), [])
-            fps = float(m.fps)
-            text = (f"At this frame (parameters of frames {segment.start:,}–{segment.end - 1:,}, "
+        enc, tuning, index = self.encoded, self._tuning(), self.current_index
+        params = self.plan.params_at(index)
+        if params is None:
+            self.plot.clear("Estimating the grain of this frame…" if self.source
+                            else "Choose the source video to estimate the grain.")
+            self.tune_label.setText("")
+            return
+        y, cb, cr = entry_sigmas(params, enc.bit_depth, enc.subsampling_x, enc.subsampling_y)
+        to8 = lambda a: sigma_in_8bit_units(a, enc.bit_depth)
+        mid = float(to8(y)[128]) if params.apply_grain and params.y_points else 0.0
+        self.plot.set_data(to8(y), to8(cb), to8(cr), [])
+        strength = f"{tuning.luma_strength * 100:.0f} %"
+        if self.model:
+            segment = self.model.segment_at(index)
+            fps = float(self.model.fps)
+            text = (f"At this frame (every-frame parameters of frames {segment.start:,}–{segment.end - 1:,}, "
                     f"{(segment.end - segment.start) / fps:.1f} s): luma grain σ {mid:.2f} at mid-grey "
-                    f"(8-bit) with {tuning.luma_strength * 100:.0f} % strength.")
-        if self.plan.clipped:
-            text += " ⚠ strength capped by the format's maximum somewhere."
+                    f"(8-bit) with {strength} strength.")
+            clipped = self.plan.clipped
+        elif not params.apply_grain:
+            text = "No grain estimate for this frame: it has too few flat areas to measure."
+            clipped = False
+        else:
+            text = (f"Estimated from this frame: luma grain σ {mid:.2f} at mid-grey (8-bit) with {strength} "
+                    "strength. Writing analyses every frame the same way, carrying the estimate "
+                    "through each shot like libaom's encoder.")
+            clipped = self.plan.clipped_at(index)
+        if clipped:
+            text += " ⚠ strength capped by the format's maximum."
         self.tune_label.setText(text)
 
     # ------------------------------------------------------------------ frames
@@ -1060,11 +956,34 @@ class MainWindow(QMainWindow):
                 del self.frame_cache[key]
         if index != self.current_index:
             return
-        self.state.set_images(images, self._caption(index))
+        # A new frame's grain is estimated in a second step, so the frame itself shows at once.
+        grain_follows = GRAIN not in images and self._grain_possible(index)
+        self.grain_dirty |= grain_follows
+        if grain_follows and self.state.mode in (GRAIN, GRAIN_ONLY) and self.state.images:
+            # Someone comparing grain keeps seeing grain: the new frame appears with its grain.
+            self._held = (index, images)
+        else:
+            self._held = None
+            self.state.set_images(images, self._caption(index))
         if not self._busy():
-            self.status_label.setText(f"Frame {index:,} loaded.")
+            self.status_label.setText(f"Frame {index:,} loaded." if not grain_follows
+                                      else f"Frame {index:,}: adding the estimated grain…")
         self._update_segment_plot()
         self._update_enabled()
+
+    _held: tuple[int, dict] | None = None
+
+    def _src_frame(self, index: int) -> Frame | None:
+        if not self.source:
+            return None
+        return self._cached(("src", str(self.source.path), index + self.offset_spin.value(), self.crop))
+
+    def _grain_possible(self, index: int) -> bool:
+        """Grain parameters exist for the frame, or can be estimated from its decoded source frame."""
+        if not self.plan:
+            return False
+        return self.plan.params_at(index) is not None or \
+            (self.model is None and self._src_frame(index) is not None)
 
     def _frame_failed(self, index: int, message: str) -> None:
         self._log(f"Could not load frame {index}: {message}")
@@ -1089,31 +1008,53 @@ class MainWindow(QMainWindow):
         if enc is None:
             self._request_frame(self.current_index)
             return
-        params, index = self.plan.params_at(self.current_index), self.current_index
-        seed = picture_seed(self.seed_spin.value(), index)
+        index, offset = self.current_index, self.offset_spin.value()
+        params, src = self.plan.params_at(index), self._src_frame(index)
+        if params is None and (self.model is not None or src is None):
+            self._request_frame(index)
+            return
+        tuning, seed = self._tuning(), picture_seed(self.seed_spin.value(), index)
+        is420 = (self.encoded.subsampling_x, self.encoded.subsampling_y) == (1, 1)
 
         def work(token, progress):
-            return index, self._grain_images(enc, params, seed)
+            raw = None
+            if params is None:          # the grain of this frame: libaom's model on it (~0.8 s at 4K)
+                raw = estimate_frame(src, enc, token)
+            shown = params if params is not None else scale_params(raw, tuning, is420)[0]
+            return index, self._grain_images(enc, shown, seed), (offset, raw)
 
         job = Job("Grain preview", work, self)
         job.succeeded.connect(self._grain_ready)
-        job.failed.connect(lambda msg: self._log(f"Grain preview failed: {msg}"))
+        job.failed.connect(lambda msg: self._grain_ready((index, {}, (offset, None)),
+                                                         f"Grain preview failed: {msg}"))
         job.finished.connect(self._frame_job_finished)
         self.frame_job = job
         job.start()
 
-    def _grain_ready(self, result) -> None:
-        index, images = result
-        if index == self.current_index:
+    def _grain_ready(self, result, error: str = "") -> None:
+        index, images, (offset, raw) = result
+        if error:
+            self._log(error)
+        if raw is not None and offset == self.offset_spin.value() and self.model is None:
+            self.estimates[index] = raw
+        held, self._held = self._held, None
+        if index != self.current_index:
+            return
+        if held and held[0] == index:
+            self.state.set_images({**held[1], **images}, self._caption(index))
+        else:
             self.state.update_images(images)
-            self._update_enabled()
+        if not self._busy():
+            self.status_label.setText(f"Frame {index:,} loaded.")
+        self._update_segment_plot()
+        self._update_enabled()
 
     # ------------------------------------------------------------------ view modes
     def _set_mode(self, mode: int) -> None:
         if not self.state.set_mode(mode):
             reason = {SOURCE: "Choose the source video to see it here.",
-                      GRAIN: "Analyse the grain (step 2) to preview it.",
-                      GRAIN_ONLY: "Analyse the grain (step 2) to preview it."}.get(mode, "")
+                      GRAIN: "The grain appears once this frame's estimate is ready.",
+                      GRAIN_ONLY: "The grain appears once this frame's estimate is ready."}.get(mode, "")
             if reason:
                 self.status_label.setText(reason)
         self._sync_mode_buttons()

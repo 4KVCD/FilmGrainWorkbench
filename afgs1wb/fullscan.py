@@ -23,8 +23,10 @@ from fractions import Fraction
 from pathlib import Path
 import hashlib
 import json
+import os
 import struct
 import subprocess
+import tempfile
 import threading
 import time
 
@@ -32,10 +34,10 @@ import numpy as np
 
 from . import synth
 from .analysis import check_alignment
-from .frames import Crop, Geometry, _filters, luma_planes, read_frames, seek_args
+from .frames import Crop, Frame, Geometry, _filters, read_frames, seek_args
 from .grain_params import GrainParams, TableEntry, format_grain_table, parse_grain_table
 from .probe import VideoInfo
-from .tools import Cancelled, CancelToken, ToolError, Tools, cpu_count
+from .tools import Cancelled, CancelToken, ToolError, Tools, cpu_count, run
 
 CHECKPOINT_EVERY = 1000      # frames between saved model states (~1 min of 4K work)
 PREFLIGHT_PLACES = 8         # alignment checks spread over the film before starting
@@ -405,3 +407,30 @@ def quick_timeline(params: GrainParams, encoded: VideoInfo, seconds: float, note
     sigma = _segment_sigma(params, g.bit_depth)
     model.sigma_frames, model.sigma_values = [0, encoded.frame_count - 1], [sigma, sigma]
     return model
+
+
+def estimate_frame(src: Frame, enc: Frame, cancel: CancelToken | None = None,
+                   analyzer: Path | None = None) -> GrainParams:
+    """Grain parameters of one frame: libaom's noise model started fresh on it.
+
+    This is what the encoder derives for the first frame of a shot (~0.7 s
+    for a 4K frame). The every-frame analysis carries the model across
+    frames, so its parameters for the same frame can differ a little.
+    Returns apply_grain=False when the model finds no usable flat areas.
+    """
+    g = enc.geometry
+    dtype = "<u2" if g.bit_depth > 8 else "u1"
+    data = b"".join(np.ascontiguousarray(p, dtype=dtype).tobytes()
+                    for p in (src.y, enc.y, src.u, enc.u, src.v, enc.v))
+    chroma = {(1, 1): "420", (1, 0): "422", (0, 0): "444"}[(g.subsampling_x, g.subsampling_y)]
+    fd, name = tempfile.mkstemp(suffix=".tbl", prefix="afgs1wb-frame-")
+    os.close(fd)
+    table = Path(name)
+    try:
+        run([str(analyzer or analyzer_path()), "--width", str(g.width), "--height", str(g.height),
+             "--bit-depth", str(g.bit_depth), "--chroma", chroma, "--threads", "1",
+             "--output", str(table)], cancel, stdin=data)
+        entries = parse_grain_table(table.read_text(encoding="ascii"))
+    finally:
+        table.unlink(missing_ok=True)
+    return entries[0].params if entries else GrainParams(apply_grain=False)

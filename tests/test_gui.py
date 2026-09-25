@@ -28,10 +28,13 @@ def wait_for(qapp, condition, timeout=120):
 
 
 def test_full_workflow(qapp, tools, need, grainy_source, grainy_clip, tmp_path):
-    need("ffmpeg", "ffprobe", "noise_model", "mkvmerge")
+    need("ffmpeg", "ffprobe", "mkvmerge")
+    import afgs1wb.fullscan as fullscan
     from afgs1wb.gui.main_window import MainWindow
     from afgs1wb.gui.viewer import ENCODED, GRAIN, SOURCE
 
+    if not fullscan.analyzer_path().is_file():
+        pytest.skip("grain analyzer not built")
     settings = QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat)
     w = MainWindow(settings, tmp_path / "data")
     w.show()
@@ -41,16 +44,10 @@ def test_full_workflow(qapp, tools, need, grainy_source, grainy_clip, tmp_path):
     w._load_video("source")
     w.encoded_edit.setText(str(grainy_clip))
     w._load_video("encoded")
-    wait_for(qapp, lambda: idle() and SOURCE in w.state.images and ENCODED in w.state.images)
-    assert w.analyse_button.isEnabled()
-
-    w.runs_spin.setValue(3)
-    w.frames_spin.setValue(6)
-    w._analyse()
-    wait_for(qapp, lambda: not w._busy() and w.model is not None)
-    wait_for(qapp, lambda: idle() and GRAIN in w.state.images)
-    assert "3 of 3 places used" in w.analysis_label.text()
-    assert w.model.kind == "quick"
+    # The grain of the frame shown is estimated as it loads: no analysis step.
+    wait_for(qapp, lambda: idle() and SOURCE in w.state.images and GRAIN in w.state.images)
+    assert w.model is None and w.current_index in w.estimates
+    assert "Estimated from this frame" in w.tune_label.text()
 
     QTest.keyClick(w, Qt.Key.Key_Right)
     assert w.state.mode == GRAIN
@@ -60,6 +57,15 @@ def test_full_workflow(qapp, tools, need, grainy_source, grainy_clip, tmp_path):
     start = w.current_index
     QTest.keyClick(w, Qt.Key.Key_Period)
     wait_for(qapp, lambda: idle() and w.current_index == start + 1)
+    assert start + 1 in w.estimates                     # a new frame gets its own estimate
+
+    # a new offset pairs other source frames: the estimates are made again
+    w.offset_spin.setValue(1)
+    w.offset_timer.timeout.emit()
+    assert not w.estimates
+    w.offset_spin.setValue(0)
+    w.offset_timer.timeout.emit()
+    wait_for(qapp, lambda: idle() and w.current_index in w.estimates)
 
     w.luma_spin.setValue(250)
     wait_for(qapp, lambda: idle() and not w.tune_timer.isActive())
@@ -77,7 +83,7 @@ def test_full_workflow(qapp, tools, need, grainy_source, grainy_clip, tmp_path):
 
 
 def test_every_frame_workflow(qapp, tools, need, grainy_source, grainy_clip, tmp_path, monkeypatch):
-    need("ffmpeg", "ffprobe", "noise_model", "mkvmerge")
+    need("ffmpeg", "ffprobe", "mkvmerge")
     import afgs1wb.fullscan as fullscan
     from afgs1wb.gui.main_window import MainWindow
     from afgs1wb.gui.viewer import GRAIN
