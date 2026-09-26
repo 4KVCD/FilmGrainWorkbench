@@ -3,14 +3,13 @@
 from __future__ import annotations
 
 import numpy as np
-from PySide6.QtCore import QPointF, QRectF, Qt
+from PySide6.QtCore import QPointF, QRectF, QSize, Qt
 from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import QSizePolicy, QWidget
 
 LUMA = QColor(235, 235, 235)
 CB = QColor(96, 160, 255)
 CR = QColor(255, 110, 96)
-RUN = QColor(150, 150, 150, 70)
 
 
 class CurvePlot(QWidget):
@@ -19,20 +18,23 @@ class CurvePlot(QWidget):
         self.setMinimumHeight(170)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.curves: list[tuple[np.ndarray, QColor, float]] = []
-        self.runs: list[np.ndarray] = []
-        self.empty_text = "Analyse the grain to see its strength curve."
-        self.setToolTip("Grain standard deviation the decoder will add at each brightness, in "
-                        "8-bit code values.\nWhite: luma. Blue/red: Cb/Cr. Grey: luma of "
-                        "individual sampled runs (before strength).")
+        self.empty_text = "The grain of the frame shown is estimated when it loads."
+        self.setToolTip("Grain standard deviation the decoder will add at each brightness for the "
+                        "frame shown, in 8-bit code values, at the strength set below.\n"
+                        "White: luma. Blue/red: Cb/Cr.")
 
-    def set_data(self, luma, cb, cr, runs) -> None:
+    def sizeHint(self) -> QSize:
+        # A fixed-height widget is laid out at its size hint; without one a
+        # plain column squeezes the plot under the rows below it.
+        return QSize(360, 170)
+
+    def set_data(self, luma, cb, cr) -> None:
         self.curves = [(np.asarray(luma), LUMA, 2.0), (np.asarray(cb), CB, 1.5),
                        (np.asarray(cr), CR, 1.5)]
-        self.runs = [np.asarray(r) for r in runs]
         self.update()
 
     def clear(self, text: str | None = None) -> None:
-        self.curves, self.runs = [], []
+        self.curves = []
         if text:
             self.empty_text = text
         self.update()
@@ -50,7 +52,7 @@ class CurvePlot(QWidget):
                        self.empty_text)
             return
         area = QRectF(34, 8, self.width() - 44, self.height() - 34)
-        top = max([float(c.max()) for c, _, _ in self.curves] + [float(r.max()) for r in self.runs] + [0.5])
+        top = max([float(c.max()) for c, _, _ in self.curves] + [0.5])
         top = self._nice(top * 1.1)
         p.setPen(QPen(QColor(60, 66, 72), 1))
         for i in range(5):
@@ -75,15 +77,11 @@ class CurvePlot(QWidget):
                 path.moveTo(point) if i == 0 else path.lineTo(point)
             return path
 
-        p.setPen(QPen(RUN, 1))
-        for run in self.runs:
-            p.drawPath(path(run))
         for values, color, width in reversed(self.curves):
             p.setPen(QPen(color, width))
             p.drawPath(path(values))
 
-        legend = [("Luma", LUMA), ("Cb", CB), ("Cr", CR)] + ([("sampled runs", QColor(150, 150, 150))]
-                                                             if self.runs else [])
+        legend = [("Luma", LUMA), ("Cb", CB), ("Cr", CR)]
         x = area.right() - 6
         for label, color in reversed(legend):
             width = p.fontMetrics().horizontalAdvance(label)

@@ -154,9 +154,14 @@ class MainWindow(QMainWindow):
 
         # 2 tune
         tune = QGroupBox("2 · Tune grain")
-        tform = QFormLayout(tune)
+        # Rows with a label sit in a form; everything else in a plain column,
+        # where word-wrapped text gets the height it needs (a form row clips it).
+        tcol = QVBoxLayout(tune)
         self.plot = CurvePlot()
-        tform.addRow(self.plot)
+        tcol.addWidget(self.plot)
+        tcol.addSpacing(8)
+        tform = QFormLayout()
+        tcol.addLayout(tform)
         self.luma_slider, self.luma_spin = self._strength_row(tform, "Luma strength",
                                                               "Scales the luma grain the encode lost. "
                                                               "100 % = as measured.")
@@ -178,12 +183,12 @@ class MainWindow(QMainWindow):
                                    "16–240), scaled to the bit depth. libaom's noise model never sets it, "
                                    "so grain in the darkest and brightest areas is not cut off.")
         self.clip_check.toggled.connect(self._tuning_changed)
-        tform.addRow(self.overlap_check)
-        tform.addRow(self.clip_check)
+        tcol.addWidget(self.overlap_check)
+        tcol.addWidget(self.clip_check)
         self.tune_label = QLabel()
         self.tune_label.setWordWrap(True)
         self.tune_label.setObjectName("info")
-        tform.addRow(self.tune_label)
+        tcol.addWidget(self.tune_label)
         model_row = QHBoxLayout()
         reset = QPushButton("Reset")
         reset.setToolTip("Back to 100 % luma and chroma strength.")
@@ -194,7 +199,7 @@ class MainWindow(QMainWindow):
         self.export_table_button.clicked.connect(self._export_table)
         for w in (reset, self.export_table_button):
             model_row.addWidget(w)
-        tform.addRow(model_row)
+        tcol.addLayout(model_row)
         side.addWidget(tune)
 
         # 3 write
@@ -821,7 +826,7 @@ class MainWindow(QMainWindow):
         y, cb, cr = entry_sigmas(params, enc.bit_depth, enc.subsampling_x, enc.subsampling_y)
         to8 = lambda a: sigma_in_8bit_units(a, enc.bit_depth)
         mid = float(to8(y)[128]) if params.apply_grain and params.y_points else 0.0
-        self.plot.set_data(to8(y), to8(cb), to8(cr), [])
+        self.plot.set_data(to8(y), to8(cb), to8(cr))
         strength = f"{tuning.luma_strength * 100:.0f} %"
         if self.model:
             segment = self.model.segment_at(index)
