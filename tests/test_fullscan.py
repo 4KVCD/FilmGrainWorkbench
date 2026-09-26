@@ -214,3 +214,15 @@ def test_writer_handles_frames_without_grain(tools, need, grainy_clip, tmp_path)
         assert all(np.array_equal(x, y) for x, y in zip(mine, grained[index])), f"frame {index}"
         has_grain = not np.array_equal(clean[index][0], grained[index][0])
         assert has_grain == (10 <= index < 20 or index >= 30), f"frame {index}"
+
+
+def test_exported_grain_table_covers_the_whole_video_like_the_written_file():
+    # A cut file's first frames cannot be analysed; Write gives them the first
+    # segment's grain, and an exported table must not leave them without grain.
+    from fractions import Fraction
+    p = sample_params()
+    model = fullscan.TimelineModel([fullscan.Segment(15, 60, p), fullscan.Segment(60, 118, p.copy())],
+                                   10, 1, 1, Fraction(24000, 1001), 120)
+    table = model.grain_table()
+    assert table[0].start == 0 and table[0].end == table[1].start
+    assert table[-1].end == int(120 * 10_000_000 * 1001 // 24000)

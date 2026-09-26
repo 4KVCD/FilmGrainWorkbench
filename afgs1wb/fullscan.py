@@ -101,9 +101,17 @@ class TimelineModel:
                    d.get("sigma_values", []), d.get("alignment", []), d.get("notes", {}))
 
     def grain_table(self) -> list[TableEntry]:
-        """Entries with real timestamps (100 ns units) for aomenc / SVT-AV1."""
+        """Entries with real timestamps (100 ns units) for aomenc / SVT-AV1.
+
+        Like the written MKV, the whole video is covered: frames before the
+        first analysed one (a cut file's undecodable start) take the first
+        segment, frames after the last one take the last. A table with gaps
+        would give those frames no grain at all.
+        """
         to_ts = lambda frame: int(frame * 10_000_000 * self.fps.denominator // self.fps.numerator)
-        return [TableEntry(to_ts(s.start), to_ts(s.end), s.params) for s in self.segments]
+        last = len(self.segments) - 1
+        return [TableEntry(to_ts(0 if i == 0 else s.start), to_ts(max(s.end, self.frames) if i == last else s.end),
+                           s.params) for i, s in enumerate(self.segments)]
 
 
 # --------------------------------------------------------------------------- helpers
