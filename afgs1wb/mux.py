@@ -36,6 +36,27 @@ class WriteReport:
     pictures: int
     packets: int
     notes: list[str] = field(default_factory=list)
+    copied: list[str] = field(default_factory=list)    # what else came over from the encode
+
+
+def _count(n: int, what: str) -> str:
+    return f"{n} {what}" + ("" if n == 1 else "s")
+
+
+def _copied_from(info: dict, main_id) -> list[str]:
+    """What mkvmerge carries over from the encode besides its VVC track, e.g. ["1 audio track"]."""
+    kinds: dict[str, int] = {}
+    for track in info.get("tracks", []):
+        if track.get("id") != main_id:
+            kinds[track.get("type", "other")] = kinds.get(track.get("type", "other"), 0) + 1
+    names = {"audio": "audio track", "subtitles": "subtitle track", "video": "other video track"}
+    out = [_count(n, names.get(kind, f"{kind} track")) for kind, n in kinds.items()]
+    chapters = sum(c.get("num_entries", 0) for c in info.get("chapters") or [])
+    if chapters:
+        out.append(_count(chapters, "chapter"))
+    if info.get("attachments"):
+        out.append(_count(len(info["attachments"]), "attachment"))
+    return out
 
 
 def picture_format(info: VideoInfo) -> PictureFormat:
@@ -84,7 +105,7 @@ _LIGHT_LEVEL_KEYS = ("max_content_light", "max_frame_light")
 
 
 def _merge_with_mkvmerge(mkvmerge: str, video: Path, original: Path, output: Path,
-                         cancel: CancelToken, skip: tuple[str, ...] = ()) -> None:
+                         cancel: CancelToken, skip: tuple[str, ...] = ()) -> list[str]:
     """Our VVC track first, then every other track, chapter, tag and attachment.
 
     ffmpeg cannot be used here: its Matroska demuxer does not rebuild decode
@@ -119,6 +140,7 @@ def _merge_with_mkvmerge(mkvmerge: str, video: Path, original: Path, output: Pat
         # mkvmerge exits with 1 for warnings; the file is complete in that case.
         if "exit code 1)" not in str(exc) or not output.is_file():
             raise
+    return _copied_from(info, main.get("id"))
 
 
 def write_afgs1_mkv(tools: Tools, encoded: VideoInfo, output: str | Path,
@@ -195,7 +217,7 @@ def write_afgs1_mkv(tools: Tools, encoded: VideoInfo, output: str | Path,
             notes.append("HDR10 mastering / light-level metadata is kept in the video stream's SEI "
                          "and not repeated in the MKV track header (ffmpeg 9 cannot apply grain "
                          "when it is there).")
-        _merge_with_mkvmerge(tools.mkvmerge, video_path, encoded.path, merged, cancel, skip)
+        copied = _merge_with_mkvmerge(tools.mkvmerge, video_path, encoded.path, merged, cancel, skip)
 
         progress(0.95, "Checking the written file…")
         written = _count_packets(merged, 0, tools.ffprobe, cancel)
@@ -209,4 +231,4 @@ def write_afgs1_mkv(tools: Tools, encoded: VideoInfo, output: str | Path,
                                f"input (first ones: {before[:6]} vs {after[:6]})")
         os.replace(merged, output)
     progress(1.0, "Done")
-    return WriteReport(output, pictures, packets, notes)
+    return WriteReport(output, pictures, packets, notes, copied)

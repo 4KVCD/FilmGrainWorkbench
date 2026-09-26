@@ -1201,8 +1201,10 @@ class MainWindow(QMainWindow):
             self._store_model_cache(model)
             self.written = Written(report, params, seed)
             size = report.output.stat().st_size / 1e9
+            also = (", ".join(report.copied) + " copied from the encode") if report.copied else \
+                "the encode has nothing else to copy"
             text = (f"Wrote {report.output.name} ({size:.2f} GB): grain metadata on all "
-                    f"{report.pictures:,} pictures; audio, subtitles and chapters copied.")
+                    f"{report.pictures:,} pictures; {also}.")
             if report.notes:
                 text += " " + " ".join(report.notes)
             self.write_label.setText(text + " Use Verify to check it with ffmpeg.")

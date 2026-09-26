@@ -29,6 +29,7 @@ def test_written_file_matches_ffmpeg_and_own_synthesis(tools, need, grainy_clip,
     output = tmp_path / "out.mkv"
     report = write_afgs1_mkv(tools, info, output, params, 1234, lambda *_: None, CancelToken())
     assert report.pictures == report.packets > 40
+    assert report.copied == ["1 audio track", "1 subtitle track"]     # what the write message lists
 
     streams = subprocess.run([tools.ffprobe, "-v", "error", "-show_entries", "stream=codec_type",
                               "-of", "csv=p=0", str(output)], capture_output=True, text=True).stdout.split()
