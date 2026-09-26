@@ -625,7 +625,7 @@ class MainWindow(QMainWindow):
         if state == "done":
             return (f"Every frame is already analysed ({self.encoded.frame_count:,} frames): writing "
                     "takes a minute or two.")
-        seconds = estimate_seconds(self.encoded, self.workers_spin.value())
+        seconds = estimate_seconds(self.encoded, self.workers_spin.value(), self.source)
         h, m = divmod(int(seconds // 60), 60)
         took = f"about {h} h {m:02d} min" if h else f"about {max(1, m)} min"
         text = (f"Writing first analyses all {self.encoded.frame_count:,} frames ({took} on this PC), "
@@ -1178,7 +1178,7 @@ class MainWindow(QMainWindow):
         offset, threads, gpu = self.offset_spin.value(), self.workers_spin.value(), self.gpu_check.isChecked()
         folder, tuning, seed = self._fullscan_dir(), self._tuning(), self.seed_spin.value()
         state, _ = self._every_frame_state()
-        seconds = estimate_seconds(enc, threads)
+        seconds = estimate_seconds(enc, threads, src)
         if state != "done" and seconds > 600 and self.confirm_long_runs:
             h, m = divmod(int(seconds // 60), 60)
             answer = QMessageBox.question(

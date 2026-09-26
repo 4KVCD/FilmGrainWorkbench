@@ -116,9 +116,16 @@ def default_threads() -> int:
     return cpu_count()
 
 
-def estimate_seconds(encoded: VideoInfo, threads: int) -> float:
-    """Rough wall time, measured on a 4K HDR cut: ~11 fps on 24 threads, decoding included."""
-    scale = encoded.width * encoded.height / (3840 * 2160)
+def estimate_seconds(encoded: VideoInfo, threads: int, source: VideoInfo | None = None) -> float:
+    """Rough wall time: ~11 fps on 24 threads for 4K, decoding included.
+
+    Measured on The Beekeeper: the 4K cut ran at ~11 fps, and the whole film
+    with a 3840x1608 encode at 11.4 fps; decoding the full 4K source costs as
+    much as the smaller encode saves, so the larger of the two pictures sets
+    the pace.
+    """
+    pixels = max(encoded.width * encoded.height, source.width * source.height if source else 0)
+    scale = pixels / (3840 * 2160)
     cpu_per_frame = 1.85 * scale
     return encoded.frame_count * cpu_per_frame / max(1, min(threads, cpu_count()) * 0.85)
 
