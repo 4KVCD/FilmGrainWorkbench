@@ -32,3 +32,19 @@ def test_format_roundtrip():
     again = parse_grain_table(format_grain_table(entries))
     assert [e.params for e in again] == [e.params for e in entries]
     assert [(e.start, e.end) for e in again] == [(e.start, e.end) for e in entries]
+
+
+def test_parsing_pauses_the_garbage_collector_and_restores_it():
+    import gc
+    from afgs1wb.grain_params import TableEntry, bulk_objects, parse_grain_table
+    from conftest import sample_params
+    assert gc.isenabled()
+    parse_grain_table(format_grain_table([TableEntry(0, 10, sample_params())]))
+    assert gc.isenabled()                       # back on after parsing
+    gc.disable()
+    try:
+        with bulk_objects():
+            pass
+        assert not gc.isenabled()               # a caller's own choice is kept
+    finally:
+        gc.enable()

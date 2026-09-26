@@ -35,7 +35,7 @@ import numpy as np
 from . import synth
 from .alignment import check_alignment
 from .frames import Crop, Frame, Geometry, _filters, read_frames, seek_args
-from .grain_params import GrainParams, TableEntry, format_grain_table, parse_grain_table
+from .grain_params import GrainParams, TableEntry, bulk_objects, format_grain_table, parse_grain_table
 from .probe import VideoInfo
 from .tools import Cancelled, CancelToken, ToolError, Tools, cpu_count, run
 
@@ -95,7 +95,8 @@ class TimelineModel:
         # Version 2 models came from reads that could land on the wrong frame.
         if d.get("kind") != "timeline" or d.get("version") != 3:
             raise ValueError("not a grain model this version can read")
-        segments = [Segment(e.start, e.end, e.params) for e in parse_grain_table(d["table_in_frames"])]
+        with bulk_objects():
+            segments = [Segment(e.start, e.end, e.params) for e in parse_grain_table(d["table_in_frames"])]
         return cls(segments, d["bit_depth"], *d["subsampling"], Fraction(*d["fps"]), d["frames"],
                    d.get("seconds", 0.0), d.get("mode", "every-frame"), d.get("sigma_frames", []),
                    d.get("sigma_values", []), d.get("alignment", []), d.get("notes", {}))
@@ -400,8 +401,9 @@ def analyze_every_frame(tools: Tools, source: VideoInfo, encoded: VideoInfo, off
         checkpoint.unlink(missing_ok=True)
 
     progress(0.99, "Summarising the grain over time…")
-    segments = [Segment(e.start, e.end, e.params)
-                for e in parse_grain_table(table.read_text(encoding="ascii"))]
+    with bulk_objects():
+        segments = [Segment(e.start, e.end, e.params)
+                    for e in parse_grain_table(table.read_text(encoding="ascii"))]
     geometry = Geometry.of(encoded)
     model = TimelineModel(segments, geometry.bit_depth, geometry.subsampling_x, geometry.subsampling_y,
                           encoded.fps, encoded.frame_count, time.perf_counter() - started,
