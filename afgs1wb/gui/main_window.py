@@ -713,11 +713,11 @@ class MainWindow(QMainWindow):
 
     def _offset_changed(self) -> None:
         """Other source frames are paired with the encode now: estimate and show them again."""
-        if self.source and self.encoded:
-            self.settings.setValue(f"offsets/{self._pair_key()}", self.offset_spin.value())
         if self.offset_spin.value() == self._applied_offset:
             return                       # e.g. "19" retyped over 19 passes through 1 on the way
         self._applied_offset = self.offset_spin.value()
+        if self.source and self.encoded:
+            self.settings.setValue(f"offsets/{self._pair_key()}", self.offset_spin.value())
         self._detected = ""
         self.estimates.clear()
         self._rebuild_plan()
@@ -1233,26 +1233,37 @@ class MainWindow(QMainWindow):
             out_info = probe(written.report.output, tools.ffprobe, token)
             theirs = read_frame(tools.ffmpeg, out_info, index, token)
             clean = read_frame(tools.ffmpeg, enc, index, token)
-            g = clean.geometry
-            mine = synth.apply_grain(clean.y, clean.u, clean.v, written.params.params_at(index),
-                                     picture_seed(written.seed, index), g.bit_depth,
+            if theirs.index != clean.index:
+                raise RuntimeError(f"the written file gave frame {theirs.index:,} where the encode gave "
+                                   f"frame {clean.index:,}")
+            # Near the start of a cut file the frame asked for may not decode; the
+            # first decodable one comes back, and its own grain is what to compare.
+            n, g = clean.index, clean.geometry
+            mine = synth.apply_grain(clean.y, clean.u, clean.v, written.params.params_at(n),
+                                     picture_seed(written.seed, n), g.bit_depth,
                                      g.subsampling_x, g.subsampling_y)
             diffs = [int(np.abs(a.astype(np.int32) - b.astype(np.int32)).max())
                      for a, b in zip(mine, (theirs.y, theirs.u, theirs.v))]
-            added = float(np.abs(theirs.y.astype(np.int32) - clean.y.astype(np.int32)).mean())
-            return diffs, added
+            added = [float(np.abs(x.astype(np.int32) - clean.y.astype(np.int32)).mean())
+                     for x in (theirs.y, mine[0])]
+            return n, diffs, added[0], added[1]
 
         def done(result):
-            diffs, added = result
-            if added == 0:
-                text = ("ffmpeg decoded the frame without grain. Your ffmpeg build may be too old to apply "
-                        "AFGS1 (FFmpeg 7.1+ applies it for VVC).")
-            elif max(diffs) == 0:
-                text = (f"✔ Frame {index:,}: ffmpeg's decode of the written file matches the preview exactly "
-                        f"(grain changes luma by {added:.2f} code values on average).")
+            n, diffs, theirs_added, mine_added = result
+            where = f"Frame {n:,}" + ("" if n == index else
+                                      f" (frame {index:,} cannot be decoded on its own; this is the first "
+                                      "frame that can)")
+            if max(diffs) == 0:
+                text = (f"✔ {where}: ffmpeg's decode of the written file matches the preview exactly "
+                        + (f"(grain changes luma by {theirs_added:.2f} code values on average)." if theirs_added
+                           else "(this frame gets no visible grain)."))
+            elif theirs_added == 0 and mine_added > 0:
+                text = (f"✖ {where}: ffmpeg decoded the written file without grain. Your ffmpeg may not apply "
+                        "AFGS1 film grain to VVC (FFmpeg 9.0.1 does).")
             else:
-                text = f"✖ Frame {index:,}: ffmpeg differs from the preview by up to {diffs} (Y, Cb, Cr)."
+                text = f"✖ {where}: ffmpeg differs from the preview by up to {diffs} (Y, Cb, Cr)."
             self.write_label.setText(text)
+            self.status_label.setText("Verified." if text.startswith("✔") else "Verification found a difference.")
             self._log(text)
 
         self._start_job("Verification", work, done, "Verifying with ffmpeg…")
