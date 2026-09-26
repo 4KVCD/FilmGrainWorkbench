@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 import sys
+import time
+import traceback
 
 from PySide6.QtGui import QColor, QPalette
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QMessageBox
 
 STYLE = """
 QGroupBox { font-weight: 600; border: 1px solid #3a4048; border-radius: 6px; margin-top: 10px; padding: 8px 6px 6px 6px; }
@@ -38,6 +41,41 @@ def _dark_palette() -> QPalette:
     return p
 
 
+def install_error_handler(window) -> None:
+    """Report errors raised on the GUI thread instead of losing them.
+
+    Under pythonw an exception in a Qt slot is printed to a stderr nobody sees
+    and the window carries on half-updated. It is written to errors.log in the
+    app's data folder, added to the activity log and shown in a message box.
+    """
+    showing = []
+
+    def hook(exc_type, exc, tb) -> None:
+        text = "".join(traceback.format_exception(exc_type, exc, tb))
+        log = Path(window.data_dir) / "errors.log"
+        try:
+            log.parent.mkdir(parents=True, exist_ok=True)
+            with open(log, "a", encoding="utf-8") as f:
+                f.write(time.strftime("%Y-%m-%d %H:%M:%S\n") + text + "\n")
+        except OSError:
+            pass
+        try:
+            window._log("Unexpected error: " + text.strip().splitlines()[-1])
+        except Exception:
+            pass
+        if showing:                       # an error while the box is open: log it only
+            return
+        showing.append(True)
+        try:
+            QMessageBox.critical(window, "Unexpected error",
+                                 f"Something went wrong; the details are in {log}.\n\n"
+                                 f"{text.strip().splitlines()[-1]}")
+        finally:
+            showing.clear()
+
+    sys.excepthook = hook
+
+
 def main() -> int:
     app = QApplication(sys.argv)
     app.setApplicationName("AFGS1 Grain Workbench")
@@ -47,6 +85,7 @@ def main() -> int:
     app.setStyleSheet(STYLE)
     from .main_window import MainWindow
     window = MainWindow()
+    install_error_handler(window)
     window.show()
     return app.exec()
 

@@ -127,3 +127,27 @@ def test_every_frame_workflow(qapp, tools, need, grainy_source, grainy_clip, tmp
     wait_for(qapp, lambda: w2.model is not None, timeout=30)
     assert "previous every-frame analysis" in w2.analysis_label.text()
     w2.close()
+
+
+def test_errors_in_the_gui_thread_are_reported(qapp, tmp_path, monkeypatch):
+    # Under pythonw an exception in a Qt slot used to vanish silently.
+    import sys
+    from PySide6.QtCore import QTimer
+    from PySide6.QtWidgets import QMessageBox
+    from afgs1wb.gui.app import install_error_handler
+    from afgs1wb.gui.main_window import MainWindow
+
+    shown = []
+    monkeypatch.setattr(QMessageBox, "critical", staticmethod(lambda *a, **k: shown.append(a[2])))
+    monkeypatch.setattr(sys, "excepthook", sys.excepthook)
+    w = MainWindow(QSettings(str(tmp_path / "s.ini"), QSettings.Format.IniFormat), tmp_path / "data")
+    install_error_handler(w)
+
+    def broken():
+        raise ZeroDivisionError("a bug in a slot")
+    QTimer.singleShot(0, broken)
+    wait_for(qapp, lambda: shown, timeout=10)
+    assert "a bug in a slot" in shown[0]
+    assert "a bug in a slot" in (tmp_path / "data" / "errors.log").read_text(encoding="utf-8")
+    assert "Unexpected error" in w.log.toPlainText()
+    w.close()
