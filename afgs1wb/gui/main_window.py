@@ -91,6 +91,7 @@ class MainWindow(QMainWindow):
         self._job_started = 0.0
         self._last_requested = 0
         self._detected = ""                  # Detect's result for the current pair and offset
+        self._applied_offset = 0             # the offset the frames shown and estimates use
 
         self._build()
         self._install_shortcuts(self, self.view)
@@ -553,6 +554,7 @@ class MainWindow(QMainWindow):
             self.offset_spin.blockSignals(True)
             self.offset_spin.setValue(int(self.settings.value(f"offsets/{self._pair_key()}", 0)))
             self.offset_spin.blockSignals(False)
+        self._applied_offset = self.offset_spin.value()
         self._clear_model_ui()
         self._rebuild_plan()
         if src and enc:
@@ -711,6 +713,9 @@ class MainWindow(QMainWindow):
         """Other source frames are paired with the encode now: estimate and show them again."""
         if self.source and self.encoded:
             self.settings.setValue(f"offsets/{self._pair_key()}", self.offset_spin.value())
+        if self.offset_spin.value() == self._applied_offset:
+            return                       # e.g. "19" retyped over 19 passes through 1 on the way
+        self._applied_offset = self.offset_spin.value()
         self._detected = ""
         self.estimates.clear()
         self._rebuild_plan()
