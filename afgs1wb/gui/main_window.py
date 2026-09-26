@@ -864,9 +864,13 @@ class MainWindow(QMainWindow):
         if self.model:
             segment = self.model.segment_at(index)
             fps = float(self.model.fps)
-            text = (f"At this frame (every-frame parameters of frames {segment.start:,}–{segment.end - 1:,}, "
-                    f"{(segment.end - segment.start) / fps:.1f} s): luma grain σ {mid:.2f} at mid-grey "
-                    f"(8-bit) with {strength} strength.")
+            span = segment.end - segment.start
+            # libaom's model moves on almost every frame, so most frames have their own parameters.
+            whose = ("the every-frame parameters measured for this frame" if span == 1 else
+                     f"every-frame parameters shared by frames {segment.start:,}–{segment.end - 1:,}, "
+                     f"{span / fps:.1f} s")
+            text = (f"At this frame ({whose}): luma grain σ {mid:.2f} at mid-grey (8-bit) with "
+                    f"{strength} strength.")
             clipped = self.plan.clipped
         elif not params.apply_grain:
             text = "No grain estimate for this frame: it has too few flat areas to measure."
