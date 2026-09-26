@@ -9,6 +9,7 @@ import afgs1wb.fullscan as fullscan
 from afgs1wb import synth
 from afgs1wb.afgs1 import picture_seed
 from afgs1wb.frames import Geometry, split_planes
+from afgs1wb.grain_params import parse_grain_table
 from afgs1wb.mux import write_afgs1_mkv
 from afgs1wb.probe import probe
 from afgs1wb.tools import Cancelled, CancelToken
@@ -177,3 +178,39 @@ def test_writer_applies_each_segments_parameters(tools, need, grainy_clip, tmp_p
     weak_amount = np.abs(grained[10][0].astype(int) - clean[10][0]).mean()
     strong_amount = np.abs(grained[30][0].astype(int) - clean[30][0]).mean()
     assert strong_amount > 3 * weak_amount
+
+
+def test_writer_handles_frames_without_grain(tools, need, grainy_clip, tmp_path):
+    # libaom's model gives no grain for frames it cannot measure (a film's black
+    # opening): apply_grain off and every other field zero, which is not a valid
+    # set of grain parameters. Grain must also come back after such frames.
+    need("ffmpeg", "ffprobe", "mkvmerge")
+    encoded = probe(grainy_clip, tools.ffprobe)
+    # the first entry of The Beekeeper's table (40 black frames), as the analyzer writes it
+    none = parse_grain_table("filmgrn1\nE 0 40 0 0 1\n\tp 0 0 0 0 0 0 0 0 0 0 0 0\n\tsY 0 \n\tsCb 0\n"
+                             "\tsCr 0\n\tcY\n\tcCb 0\n\tcCr 0\n")[0].params
+    assert not none.apply_grain and none.ar_coeff_shift == 0 and none.scaling_shift == 0
+    model = fullscan.TimelineModel([fullscan.Segment(0, 10, none), fullscan.Segment(10, 20, sample_params()),
+                                    fullscan.Segment(20, 30, none.copy()),
+                                    fullscan.Segment(30, 60, sample_params())],
+                                   10, 1, 1, encoded.fps, encoded.frame_count)
+    for strength in (1.0, 2.0):
+        plan = TimelinePlan(model, Tuning(luma_strength=strength, chroma_strength=strength))
+        out = tmp_path / f"none{strength}.mkv"
+        write_afgs1_mkv(tools, encoded, out, plan, 7391, lambda *_: None, CancelToken())
+    g = Geometry.of(encoded)
+
+    def decode(path, *extra):
+        data = subprocess.run([tools.ffmpeg, "-v", "error", *extra, "-i", str(path), "-map", "0:v:0",
+                               "-f", "rawvideo", "-pix_fmt", g.pix_fmt, "-"],
+                              capture_output=True, check=True).stdout
+        return [split_planes(data[i * g.frame_bytes:(i + 1) * g.frame_bytes], g)
+                for i in range(len(data) // g.frame_bytes)]
+
+    clean = decode(out, "-export_side_data", "film_grain")
+    grained = decode(out)
+    for index in (0, 9, 10, 19, 20, 29, 30, 40):
+        mine = synth.apply_grain(*clean[index], plan.params_at(index), picture_seed(7391, index), 10)
+        assert all(np.array_equal(x, y) for x, y in zip(mine, grained[index])), f"frame {index}"
+        has_grain = not np.array_equal(clean[index][0], grained[index][0])
+        assert has_grain == (10 <= index < 20 or index >= 30), f"frame {index}"

@@ -61,7 +61,14 @@ class GrainParams:
         return num_luma_ar_coeffs(self.ar_coeff_lag) + (1 if self.y_points else 0)
 
     def validate(self, subsampled_420: bool = True) -> None:
-        """Raise ValueError if the parameters cannot be coded or synthesized."""
+        """Raise ValueError if the parameters cannot be coded or synthesized.
+
+        A set with apply_grain off is coded as that flag alone, so its other
+        fields do not matter: libaom leaves them all zero for a frame it
+        cannot measure (e.g. black frames).
+        """
+        if not self.apply_grain:
+            return
         def check_points(points, limit, name):
             if len(points) > limit:
                 raise ValueError(f"{name}: {len(points)} points, at most {limit} allowed")
