@@ -958,7 +958,12 @@ class MainWindow(QMainWindow):
             s = src_frame or next((f for f in s_run if f.index == index + offset), None)
             e = enc_frame or next((f for f in e_run if f.index == index), None)
             if e is None:
-                raise RuntimeError(f"frame {index} is past the end of the encode")
+                if e_run and e_run[0].index > index:
+                    # A file cut from a longer one starts with pictures that refer to
+                    # frames cut away; the first ones cannot be decoded.
+                    raise RuntimeError(f"frame {index:,} cannot be decoded: its pictures refer to frames "
+                                       f"cut away before it. The first frame that can is {e_run[0].index:,}.")
+                raise RuntimeError(f"frame {index:,} is past the end of the encode")
             with ThreadPoolExecutor(3) as pool:
                 jobs = {ENCODED: pool.submit(lambda: _qimage(converter.to_rgb(e.y, e.u, e.v)))}
                 if s is not None:
