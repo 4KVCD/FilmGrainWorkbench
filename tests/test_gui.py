@@ -151,3 +151,30 @@ def test_errors_in_the_gui_thread_are_reported(qapp, tmp_path, monkeypatch):
     assert "a bug in a slot" in (tmp_path / "data" / "errors.log").read_text(encoding="utf-8")
     assert "Unexpected error" in w.log.toPlainText()
     w.close()
+
+
+def test_each_pair_keeps_its_frame_offset_and_shows_how_well_frames_match(
+        qapp, tools, need, grainy_source, grainy_clip, tmp_path):
+    need("ffmpeg", "ffprobe")
+    from afgs1wb.gui.main_window import MainWindow
+    from afgs1wb.gui.viewer import ENCODED
+
+    settings = QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat)
+    w = MainWindow(settings, tmp_path / "data")
+    idle = lambda: not (w.frame_job and w.frame_job.isRunning()) and not w.frame_timer.isActive()
+    w.source_edit.setText(str(grainy_source)); w._load_video("source")
+    w.encoded_edit.setText(str(grainy_clip)); w._load_video("encoded")
+    wait_for(qapp, lambda: idle() and ENCODED in w.state.images)
+    assert "✔" in w.offset_note.text()                        # the right pairing reads as a match
+    w.offset_spin.setValue(3)
+    w.offset_timer.timeout.emit()
+    wait_for(qapp, lambda: idle() and ENCODED in w.state.images)
+    assert "⚠" in w.offset_note.text()                        # 3 frames off: flagged
+    w.close()
+
+    w2 = MainWindow(settings, tmp_path / "data")              # same pair again: its offset is back
+    wait_for(qapp, lambda: w2.encoded is not None)
+    assert w2.offset_spin.value() == 3
+    w2.encoded_edit.setText(str(grainy_source)); w2._load_video("encoded")
+    assert w2.offset_spin.value() == 0                        # another pair does not inherit it
+    w2.close()

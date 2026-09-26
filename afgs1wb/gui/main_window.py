@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QFileDialog, QFormLayout
 
 from .. import display, synth
 from ..afgs1 import picture_seed
-from ..alignment import detect_offset
+from ..alignment import block_means, detect_offset, frame_match
 from ..fullscan import (TimelineModel, analyze_every_frame, analyzer_path, cache_key,
                         checkpoint_frame, default_threads, estimate_frame, estimate_seconds)
 from ..frames import Crop, Frame, Geometry, read_frame, read_frames, source_crop_for
@@ -90,6 +90,7 @@ class MainWindow(QMainWindow):
         self.viewer_window: ViewerWindow | None = None
         self._job_started = 0.0
         self._last_requested = 0
+        self._detected = ""                  # Detect's result for the current pair and offset
 
         self._build()
         self._install_shortcuts(self, self.view)
@@ -149,7 +150,14 @@ class MainWindow(QMainWindow):
         offset_row.addWidget(self.detect_button)
         grid.addWidget(QLabel("Frame offset"), 4, 0)
         grid.addLayout(offset_row, 4, 1, 1, 2)
-        grid.addWidget(self.pair_note, 5, 0, 1, 3)
+        self.offset_note = QLabel()
+        self.offset_note.setWordWrap(True)
+        self.offset_note.setObjectName("info")
+        self.offset_note.setToolTip("How closely the source frame paired with the encoded frame shown "
+                                    "matches it (PSNR of the luma). The same frame matches far better "
+                                    "than its neighbours; a low value usually means a wrong offset.")
+        grid.addWidget(self.offset_note, 5, 1, 1, 2)
+        grid.addWidget(self.pair_note, 6, 0, 1, 3)
         side.addWidget(files)
 
         # 2 tune
@@ -537,6 +545,14 @@ class MainWindow(QMainWindow):
                              "check the frame offset (Detect).")
         self.pair_note.setText("\n".join(notes))
         self.pair_note.setVisible(bool(notes))
+        self._detected = ""
+        self.offset_note.setText("")
+        if src and enc:
+            # Each pair keeps its own offset; a new pair starts at 0, not at the last pair's.
+            self.offset_timer.stop()
+            self.offset_spin.blockSignals(True)
+            self.offset_spin.setValue(int(self.settings.value(f"offsets/{self._pair_key()}", 0)))
+            self.offset_spin.blockSignals(False)
         self._clear_model_ui()
         self._rebuild_plan()
         if src and enc:
@@ -550,6 +566,9 @@ class MainWindow(QMainWindow):
         self._update_enabled()
 
     _output_is_auto = True
+
+    def _pair_key(self) -> str:
+        return hashlib.sha1(f"{self.source.path}|{self.encoded.path}".encode()).hexdigest()[:16]
 
     # ------------------------------------------------------------------ enabling
     def _busy(self) -> bool:
@@ -674,18 +693,25 @@ class MainWindow(QMainWindow):
 
         def done(result):
             offset, confidence = result
+            self.offset_spin.blockSignals(True)
             self.offset_spin.setValue(offset)
+            self.offset_spin.blockSignals(False)
             quality = "confident" if confidence > 0.5 else "not certain — check a few frames"
             text = f"Detected offset {offset:+d} frames ({quality})."
             self.status_label.setText(text)
             self._log(text)
             self.offset_timer.stop()
             self._offset_changed()
+            self._detected = text           # kept on screen: the frame loads that follow update the status bar
+            self.offset_note.setText(text)
 
         self._start_job("Offset detection", work, done, "Detecting the frame offset…")
 
     def _offset_changed(self) -> None:
         """Other source frames are paired with the encode now: estimate and show them again."""
+        if self.source and self.encoded:
+            self.settings.setValue(f"offsets/{self._pair_key()}", self.offset_spin.value())
+        self._detected = ""
         self.estimates.clear()
         self._rebuild_plan()
         for key in [k for k in self.frame_cache if k[0] == "src"]:
@@ -897,6 +923,9 @@ class MainWindow(QMainWindow):
         enc_key = ("enc", str(enc_info.path), index)
         src_frame = self._cached(src_key) if src_info else None
         enc_frame = self._cached(enc_key)
+        # The source frames either side of the paired one tell a wrong offset from a still shot.
+        beside = {k: f for k in (index + offset - 1, index + offset + 1)
+                  if src_info and (f := self._cached(("src", str(src_info.path), k, crop))) is not None}
         params = self.plan.params_at(index) if self.plan else None
         seed = picture_seed(self.seed_spin.value(), index)
         converter = self.converter
@@ -911,9 +940,9 @@ class MainWindow(QMainWindow):
             with ThreadPoolExecutor(2) as pool:
                 need_src = src_info is not None and src_frame is None \
                     and 0 <= index + offset < src_info.frame_count
-                s_start = max(0, start + offset)
+                s_start = max(0, start + offset - 1)          # one extra frame either side
                 fs = pool.submit(read_frames, tools.ffmpeg, src_info, s_start,
-                                 min(count, src_info.frame_count - s_start), token, geometry, crop) \
+                                 min(count + 2, src_info.frame_count - s_start), token, geometry, crop) \
                     if need_src else None
                 fe = pool.submit(read_frames, tools.ffmpeg, enc_info, start, count, token) \
                     if enc_frame is None else None
@@ -933,7 +962,13 @@ class MainWindow(QMainWindow):
                     images.update(grain.result())
             extra = [(("src", str(src_info.path), f.index, crop), f) for f in s_run] + \
                     [(("enc", str(enc_info.path), f.index), f) for f in e_run]
-            return index, extra, images
+            match = None
+            if src_info is not None:
+                paired = index + offset
+                near = {**beside, **{f.index: f for f in s_run}, **({paired: s} if s is not None else {})}
+                means = {k: block_means(near[k].y) for k in (paired - 1, paired, paired + 1) if k in near}
+                match = frame_match(means, block_means(e.y), paired, float((1 << geometry.bit_depth) - 1))
+            return index, extra, images, (offset, match)
 
         job = Job("Frame", work, self)
         job.succeeded.connect(self._frame_ready)
@@ -954,7 +989,7 @@ class MainWindow(QMainWindow):
                 GRAIN_ONLY: _qimage(display.grain_only(e.y, y, g.bit_depth))}
 
     def _frame_ready(self, result) -> None:
-        index, extra, images = result
+        index, extra, images, (offset, match) = result
         for key, frame in extra:
             self.frame_cache[key] = frame
             self.frame_cache.move_to_end(key)
@@ -966,6 +1001,8 @@ class MainWindow(QMainWindow):
                 del self.frame_cache[key]
         if index != self.current_index:
             return
+        if offset == self.offset_spin.value():
+            self._show_match(index, match)
         # A new frame's grain is estimated in a second step, so the frame itself shows at once.
         grain_follows = GRAIN not in images and self._grain_possible(index)
         self.grain_dirty |= grain_follows
@@ -982,6 +1019,28 @@ class MainWindow(QMainWindow):
         self._update_enabled()
 
     _held: tuple[int, dict] | None = None
+
+    def _show_match(self, index: int, match) -> None:
+        """Under the offset: does the frame shown pair with the right source frame?"""
+        text = ""
+        if self.source and match is not None:
+            verdict, same, best = match
+            paired = index + self.offset_spin.value()
+            if verdict == "same":
+                text = (f"✔ Frame {index:,} matches source frame {paired:,} ({same:.1f} dB; the frames "
+                        f"beside it {best:.1f} dB).")
+            elif verdict == "neighbour":
+                text = (f"⚠ Frame {index:,}: a source frame next to {paired:,} matches it better "
+                        f"({best:.1f} vs {same:.1f} dB), so the offset is off by one. Try Detect.")
+            elif verdict == "none":
+                text = (f"⚠ Frame {index:,} does not match source frame {paired:,} or the frames beside it "
+                        f"({same:.1f} dB): the frame offset looks wrong. Try Detect.")
+            elif verdict == "unclear":
+                text = (f"Frame {index:,}: the offset can't be checked here; the source frames around "
+                        f"{paired:,} look alike ({same:.1f} dB).")
+            else:
+                text = f"No source frame for encoded frame {index:,} at this offset (source frame {paired:,})."
+        self.offset_note.setText("\n".join(t for t in (self._detected, text) if t))
 
     def _src_frame(self, index: int) -> Frame | None:
         if not self.source:

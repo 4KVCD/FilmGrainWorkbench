@@ -84,3 +84,40 @@ def detect_offset(tools: Tools, source: VideoInfo, encoded: VideoInfo, crop: Cro
     offset, count = max(votes.items(), key=lambda kv: kv[1])
     confidence = count / positions * min(1.0, (np.median(margins) - 1.0) if margins else 0.0)
     return offset, float(max(0.0, min(1.0, confidence)))
+
+
+# --------------------------------------------------------------------------- the frame on screen
+
+MATCH_MARGIN_DB = 1.0       # the paired frame must beat its neighbours by this much
+MATCH_FLOOR_DB = 35.0       # below this, a tie with the neighbours means nothing matches
+
+
+def block_means(luma: np.ndarray, size: int = 8) -> np.ndarray:
+    """Luma averaged over size x size blocks: grain averages out, the picture stays."""
+    h, w = (luma.shape[0] // size) * size, (luma.shape[1] // size) * size
+    return luma[:h, :w].astype(np.float32).reshape(h // size, size, w // size, size).mean(axis=(1, 3))
+
+
+def frame_match(source: dict[int, np.ndarray], encoded: np.ndarray, paired: int,
+                peak: float) -> tuple[str, float | None, float | None]:
+    """Is ``encoded`` the source frame ``paired``? Returns (verdict, paired dB, best neighbour dB).
+
+    ``source`` maps source frame numbers to block means (from :func:`block_means`)
+    of the paired frame and whichever neighbours are at hand. Comparing block
+    means, not pixels, keeps grain the encode removed from reading as a
+    mismatch; comparing with the neighbours tells a wrong offset from a still
+    shot. Verdicts: "same", "neighbour" (a neighbour matches better),
+    "none" (nothing matches), "unclear" (neighbours look alike), "missing".
+    """
+    if paired not in source:
+        return "missing", None, None
+    same = _psnr(source[paired], encoded, peak)
+    others = [_psnr(source[k], encoded, peak) for k in (paired - 1, paired + 1) if k in source]
+    if not others:
+        return "unclear", same, None
+    best = max(others)
+    if best > same + MATCH_MARGIN_DB:
+        return "neighbour", same, best
+    if same > best + MATCH_MARGIN_DB:
+        return "same", same, best
+    return ("none" if same < MATCH_FLOOR_DB else "unclear"), same, best
