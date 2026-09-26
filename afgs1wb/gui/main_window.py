@@ -619,6 +619,8 @@ class MainWindow(QMainWindow):
             return "The grain analyzer is not built yet: run analyzer\\build.py."
         if not (self.encoded and self.source):
             return "Writing analyses the grain of every frame, like libaom's encoder, then adds it."
+        if self.encoded.codec != "vvc":
+            return "This encode is not VVC, so grain metadata cannot be written into it."
         state, at = self._every_frame_state()
         if state == "done":
             return (f"Every frame is already analysed ({self.encoded.frame_count:,} frames): writing "
