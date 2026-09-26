@@ -331,9 +331,12 @@ def analyze_every_frame(tools: Tools, source: VideoInfo, encoded: VideoInfo, off
 
     resume_at = checkpoint_frame(checkpoint) if checkpoint.exists() and table.exists() else None
     warnings: list[str] = []
+    seconds = 0.0                        # how long the analysis itself took (not reading it back)
+    resumed = False
     if done_marker.exists() and table.exists():
         marker = json.loads(done_marker.read_text())
         alignment, warnings = marker.get("alignment", []), marker.get("warnings", [])
+        seconds, resumed = float(marker.get("seconds", 0.0)), bool(marker.get("resumed", False))
     else:
         progress(-1, "Checking that source and encode frames line up…")
         first = first_common_frame(tools, source, encoded, offset, crop, first, cancel)
@@ -397,7 +400,10 @@ def analyze_every_frame(tools: Tools, source: VideoInfo, encoded: VideoInfo, off
         if first > 0:
             warnings.append(f"Frames before {first:,} could not be decoded in both files; they use "
                             "the first measured grain.")
-        done_marker.write_text(json.dumps({"alignment": alignment, "warnings": warnings}))
+        seconds = time.perf_counter() - started       # this run only, if it resumed an earlier one
+        resumed = resume
+        done_marker.write_text(json.dumps({"alignment": alignment, "warnings": warnings, "seconds": seconds,
+                                           "resumed": resume}))
         checkpoint.unlink(missing_ok=True)
 
     progress(0.99, "Summarising the grain over time…")
@@ -406,8 +412,8 @@ def analyze_every_frame(tools: Tools, source: VideoInfo, encoded: VideoInfo, off
                     for e in parse_grain_table(table.read_text(encoding="ascii"))]
     geometry = Geometry.of(encoded)
     model = TimelineModel(segments, geometry.bit_depth, geometry.subsampling_x, geometry.subsampling_y,
-                          encoded.fps, encoded.frame_count, time.perf_counter() - started,
-                          "every-frame", alignment=alignment, notes={"warnings": warnings})
+                          encoded.fps, encoded.frame_count, seconds,
+                          "every-frame", alignment=alignment, notes={"warnings": warnings, "resumed": resumed})
     sample_sigmas(model, cancel)
     return model
 

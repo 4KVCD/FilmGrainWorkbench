@@ -178,3 +178,30 @@ def test_each_pair_keeps_its_frame_offset_and_shows_how_well_frames_match(
     w2.encoded_edit.setText(str(grainy_source)); w2._load_video("encoded")
     assert w2.offset_spin.value() == 0                        # another pair does not inherit it
     w2.close()
+
+
+def test_a_saved_analysis_loads_in_the_background(qapp, tools, need, grainy_source, grainy_clip, tmp_path):
+    # A whole-film analysis takes seconds to read; loading it must not freeze the window.
+    need("ffmpeg", "ffprobe")
+    import afgs1wb.fullscan as fullscan
+    from afgs1wb.fullscan import TimelineModel
+    from afgs1wb.gui.main_window import MainWindow
+    from conftest import sample_params
+
+    settings = QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat)
+    w = MainWindow(settings, tmp_path / "data")
+    w.source_edit.setText(str(grainy_source)); w._load_video("source")
+    w.encoded_edit.setText(str(grainy_clip)); w._load_video("encoded")
+    model = TimelineModel([fullscan.Segment(0, w.encoded.frame_count, sample_params())], 10, 1, 1,
+                          w.encoded.fps, w.encoded.frame_count, 3 * 3600 + 42 * 60, "every-frame")
+    w._model_cache_file().parent.mkdir(parents=True)
+    w._model_cache_file().write_text(model.to_json(), encoding="utf-8")
+    w.close()
+
+    w2 = MainWindow(settings, tmp_path / "data")
+    wait_for(qapp, lambda: w2.encoded is not None)
+    assert w2.model is None                                   # not read on the GUI thread...
+    assert "Loading the saved every-frame analysis" in w2.analysis_label.text()
+    wait_for(qapp, lambda: w2.model is not None)              # ...but arrives shortly after
+    assert "The analysis took 3 h 42 min." in w2.analysis_label.text()
+    w2.close()

@@ -81,6 +81,7 @@ class MainWindow(QMainWindow):
         self.written: Written | None = None
         self.job: Job | None = None
         self.frame_job: Job | None = None
+        self.model_job: Job | None = None                # loads a saved analysis in the background
         self.pending_index: int | None = None
         self.grain_dirty = False
         self.frame_cache: OrderedDict[tuple, Frame] = OrderedDict()
@@ -734,9 +735,12 @@ class MainWindow(QMainWindow):
         self.written = None
         scale = 1 << (model.bit_depth - 8)
         h, rem = divmod(int(model.seconds), 3600)
-        took = (f" Took {h} h {rem // 60:02d} min." if model.seconds >= 3600 else
-                f" Took {model.seconds / 60:.0f} min." if model.seconds >= 60 else
-                f" Took {model.seconds:.0f} s." if model.seconds else "")
+        took = (f" {h} h {rem // 60:02d} min" if model.seconds >= 3600 else
+                f" {model.seconds / 60:.0f} min" if model.seconds >= 60 else
+                f" {model.seconds:.0f} s" if model.seconds else "")
+        if took:
+            took = (" The analysis took" + took
+                    + (" after resuming (not counting the part before)." if model.notes.get("resumed") else "."))
         values = np.array(model.sigma_values or [0.0]) / scale
         text = (f"Every frame analysed: {model.frames:,} frames, {len(model.segments):,} parameter "
                 f"changes. Grain σ at mid-grey across the film: median {np.median(values):.2f}, "
@@ -771,29 +775,44 @@ class MainWindow(QMainWindow):
         folder = self.data_dir / "models"
         return folder / (hashlib.sha1(key.encode()).hexdigest()[:16] + ".json")
 
-    def _store_model_cache(self, model: TimelineModel) -> None:
+    def _model_cache_file(self) -> Path | None:
         path = self._cache_path()
-        if path:
-            path = path.with_suffix(f".{model.kind}.json")
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(model.to_json(), encoding="utf-8")
-
-    @staticmethod
-    def _model_from_json(text: str) -> TimelineModel:
-        return TimelineModel.from_json(text)
+        return path.with_suffix(".every-frame.json") if path else None
 
     def _autoload_model(self) -> None:
-        path = self._cache_path()
-        if not path:
+        """Load this pair's saved every-frame analysis in the background.
+
+        A whole-film analysis is ~150,000 parameter sets and takes a few
+        seconds to read; the window stays usable meanwhile, showing the live
+        per-frame estimates until it arrives.
+        """
+        candidate = self._model_cache_file()
+        if not candidate or not candidate.is_file():
             return
-        candidate = path.with_suffix(".every-frame.json")
-        if candidate.is_file():
-            try:
-                model = self._model_from_json(candidate.read_text(encoding="utf-8"))
-            except (ValueError, KeyError):
-                return
-            if model.kind == "every-frame":
-                self._set_model(model, loaded_from="the previous every-frame analysis")
+        pair = (str(self.source.path), str(self.encoded.path))
+        self.analysis_label.setText("Loading the saved every-frame analysis of these files…")
+        self.analysis_label.show()
+
+        def work(token, progress):
+            return TimelineModel.from_json(candidate.read_text(encoding="utf-8"))
+
+        job = Job("Loading the saved analysis", work, self)
+        job.succeeded.connect(lambda model: self._model_loaded(model, pair))
+        job.failed.connect(lambda msg: self._model_loaded(None, pair, msg))
+        job.finished.connect(job.deleteLater)
+        self.model_job = job
+        job.start()
+
+    def _model_loaded(self, model: TimelineModel | None, pair: tuple[str, str], error: str = "") -> None:
+        still_here = bool(self.source and self.encoded) and \
+            (str(self.source.path), str(self.encoded.path)) == pair
+        if not still_here or self.model is not None:     # another pair now, or a Write finished first
+            return
+        if model is None or model.kind != "every-frame":
+            self._log(f"The saved analysis could not be read: {error or 'not an every-frame analysis'}")
+            self.analysis_label.hide()
+            return
+        self._set_model(model, loaded_from="the previous every-frame analysis")
 
     def _export_table(self) -> None:
         if not self.plan:
@@ -1186,6 +1205,7 @@ class MainWindow(QMainWindow):
         src, enc, tools, crop = self.source, self.encoded, self.tools, self.crop
         offset, threads, gpu = self.offset_spin.value(), self.workers_spin.value(), self.gpu_check.isChecked()
         folder, tuning, seed = self._fullscan_dir(), self._tuning(), self.seed_spin.value()
+        cache_file = self._model_cache_file()
         state, _ = self._every_frame_state()
         seconds = estimate_seconds(enc, threads, src)
         if state != "done" and seconds > 600 and self.confirm_long_runs:
@@ -1208,13 +1228,16 @@ class MainWindow(QMainWindow):
             plan = TimelinePlan(model, tuning)
             report = write_afgs1_mkv(tools, enc, output, plan, seed,
                                      lambda f, m: progress(f, ("Step 2 of 2 · " if steps else "") + m), token)
+            # Saved here, not in done(): a whole-film analysis takes seconds to serialise.
+            if cache_file:
+                cache_file.parent.mkdir(parents=True, exist_ok=True)
+                cache_file.write_text(model.to_json(), encoding="utf-8")
             return model, plan, report
 
         def done(result):
             model, params, report = result
             # The preview now shows what was written: the every-frame parameters.
             self._set_model(model)
-            self._store_model_cache(model)
             self.written = Written(report, params, seed)
             size = report.output.stat().st_size / 1e9
             also = (", ".join(report.copied) + " copied from the encode") if report.copied else \
@@ -1296,6 +1319,11 @@ class MainWindow(QMainWindow):
         if self.frame_job and self.frame_job.isRunning():
             self.frame_job.cancel()
             self.frame_job.wait(5000)
+        try:
+            if self.model_job and self.model_job.isRunning():
+                self.model_job.wait(15000)       # reading a saved analysis cannot be interrupted
+        except RuntimeError:                     # already finished and deleted
+            pass
         if self.viewer_window:
             self.settings.setValue("viewer/geometry", self.viewer_window.saveGeometry())
             self.viewer_window.close()
