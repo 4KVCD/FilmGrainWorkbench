@@ -17,8 +17,9 @@ class PreviewState(QObject):
     """Images for the current frame and which one is shown."""
     changed = Signal()
 
-    def __init__(self) -> None:
+    def __init__(self, names: dict[int, str] | None = None) -> None:
         super().__init__()
+        self.names = names or VIEW_NAMES       # what each view is called in captions
         self.images: dict[int, QPixmap] = {}
         self.mode = ENCODED
         self.caption = ""
@@ -115,7 +116,7 @@ class FrameView(QGraphicsView):
 
     def _update_overlay(self) -> None:
         zoom = "fit" if self._fit else f"{self._zoom * 100:.0f}%"
-        self.overlay.setText(f"<b>{VIEW_NAMES[self.state.mode]}</b> &nbsp; {self.state.caption}"
+        self.overlay.setText(f"<b>{self.state.names[self.state.mode]}</b> &nbsp; {self.state.caption}"
                              f" &nbsp; {zoom}")
         self.overlay.adjustSize()
         self.overlay.show()
@@ -186,7 +187,7 @@ class ViewerWindow(QWidget):
 
     def _title(self) -> None:
         state = self.view.state
-        self.setWindowTitle(f"{VIEW_NAMES[state.mode]} — {state.caption}" if state.pixmap else "Frame viewer")
+        self.setWindowTitle(f"{state.names[state.mode]} — {state.caption}" if state.pixmap else "Frame viewer")
 
     def show_sized(self) -> None:
         """Open at 100 % if the frame fits on screen, otherwise as large as sensible."""

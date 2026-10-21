@@ -1,0 +1,411 @@
+"""VVC's own film grain: VVenC's analysis (--fga) and vvdec's synthesis, on short clips.
+
+For the frame being looked at, a clip of consecutive source frames around it
+is encoded by vvencapp with film grain analysis on, which writes the measured
+grain as an H.274 film grain characteristics (FGC) SEI message. vvdecapp then
+decodes the clip twice: without the grain synthesis (the picture after VVenC
+removed the grain: its MCTF pre-filter plus coding at the chosen QP) and with
+it (what a decoder that synthesises the grain shows). The grain parameters each
+frame carries are read from the bitstream (ffmpeg drops the auto-regressive model).
+
+vvencapp and vvdecapp are looked for in the app's bin folder, then on PATH.
+"""
+
+from __future__ import annotations
+
+from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
+from pathlib import Path
+import re
+import shutil
+import time
+
+import numpy as np
+
+from .bits import BitReader
+from .frames import _PTS_TIME, Crop, Frame, Geometry, _command, frame_index, seek_args, split_planes
+from .probe import VideoInfo
+from .tools import CancelToken, ToolError, run, run_with_log
+from .vvc import NAL_PREFIX_SEI, parse_sei_messages, unescape_rbsp
+
+PRESETS = ("faster", "fast", "medium", "slow", "slower")
+FGA_MODES = {1: "1 · VTM analysis (JVET-AN0237)",
+             2: "2 · calibrated, temporal residual",
+             3: "3 · auto-regressive grain model"}
+SOURCE, DECODED, GRAIN = "source", "decoded", "grain"
+_FILES = {SOURCE: "source.yuv", DECODED: "decoded.yuv", GRAIN: "grain.yuv"}
+
+
+@dataclass(frozen=True)
+class VvcTools:
+    vvencapp: str = ""
+    vvdecapp: str = ""
+
+    def missing(self) -> list[str]:
+        return [name for name, path in (("vvencapp", self.vvencapp), ("vvdecapp", self.vvdecapp))
+                if not path or not Path(path).is_file()]
+
+
+def find_vvc_tools() -> VvcTools:
+    """vvencapp / vvdecapp from the app's bin folder (built by vvc/build_vvc_tools.ps1), else PATH."""
+    bin_dir = Path(__file__).resolve().parents[1] / "bin"
+
+    def find(name: str) -> str:
+        local = bin_dir / f"{name}.exe"
+        return str(local) if local.is_file() else (shutil.which(name) or "")
+    return VvcTools(find("vvencapp"), find("vvdecapp"))
+
+
+@dataclass(frozen=True)
+class VvcSettings:
+    """What VVenC is asked to do. Changing any of these encodes the clip again."""
+    fga: int = 2                  # --fga: 1 VTM analysis, 2 calibrated, 3 auto-regressive model
+    strength: int = 100           # --fgastrength, percent of the analysed grain
+    qp: float = 28.0
+    preset: str = "faster"
+    frames: int = 33              # clip length: one 32-frame GOP plus the next intra frame
+
+
+@dataclass
+class GrainComponent:
+    """One colour component of an FGC message: intervals of 8-bit intensity and their model values."""
+    pieces: list[tuple[int, int, list[int]]]       # (lower, upper, values)
+
+
+@dataclass
+class GrainSet:
+    """The film grain parameters a frame carries (an H.274 FGC SEI message)."""
+    model_id: int                                  # 0 frequency filtering, 1 auto-regressive
+    blending_mode_id: int                          # 0 additive, 1 multiplicative
+    log2_scale_factor: int
+    components: list[GrainComponent | None]        # Y, Cb, Cr; None = not present
+
+    def describe(self) -> str:
+        model = "frequency filtering" if self.model_id == 0 else "auto-regressive"
+        blend = "additive" if self.blending_mode_id == 0 else "multiplicative"
+        lines = [f"{model} model, {blend} blending, log2_scale_factor {self.log2_scale_factor}"]
+        for name, comp in zip(("Y", "Cb", "Cr"), self.components):
+            if comp is None or not comp.pieces:
+                lines.append(f"{name}: no grain")
+                continue
+            parts = []
+            for lower, upper, values in comp.pieces:
+                rest = ""
+                if self.model_id == 0 and len(values) >= 3:
+                    rest = f" cut-off H{values[1]} V{values[2]}"
+                elif len(values) > 1:
+                    rest = " AR " + " ".join(str(v) for v in values[1:])
+                parts.append(f"{lower}–{upper}: {values[0] if values else 0}{rest}")
+            lines.append(f"{name}: " + "; ".join(parts))
+        return "\n".join(lines)
+
+
+@dataclass
+class Clip:
+    """A clip encoded and decoded with the given settings; frames live in raw files."""
+    start: int                                     # first source frame
+    count: int
+    geometry: Geometry
+    folder: Path
+    settings: VvcSettings
+    crop: Crop | None
+    fps: float
+    grain: list[GrainSet | None] = field(default_factory=list)
+    encode_seconds: float = 0.0
+
+    def covers(self, index: int) -> bool:
+        return self.start <= index < self.start + self.count
+
+    @property
+    def bitstream(self) -> Path:
+        return self.folder / "clip.266"
+
+    @property
+    def kbps(self) -> float:
+        return self.bitstream.stat().st_size * 8 / 1000 / (self.count / self.fps)
+
+    def frame(self, which: str, index: int) -> Frame:
+        g = self.geometry
+        k = index - self.start
+        if not 0 <= k < self.count:
+            raise IndexError(f"frame {index} is not in the clip {self.start}–{self.start + self.count - 1}")
+        data = np.fromfile(self.folder / _FILES[which], dtype=np.uint16, count=g.frame_bytes // 2,
+                           offset=k * g.frame_bytes)
+        y, u, v = split_planes(data, g)
+        return Frame(index, y, u, v, g)
+
+    def grain_at(self, index: int) -> GrainSet | None:
+        k = index - self.start
+        return self.grain[k] if 0 <= k < len(self.grain) else None
+
+    def remove(self) -> None:
+        shutil.rmtree(self.folder, ignore_errors=True)
+
+
+def clip_start(index: int, length: int) -> int:
+    """Clips tile the video, so stepping through frames re-encodes only at clip borders."""
+    return (index // length) * length
+
+
+def detect_black_bars(ffmpeg: str, info: VideoInfo, cancel: CancelToken | None = None) -> Crop | None:
+    """Letterbox / pillarbox borders, from ffmpeg's cropdetect at three places in the video.
+
+    The largest picture area found is kept, so a dark scene cannot crop real
+    picture away. Returns None when there are no borders.
+    """
+    boxes: list[tuple[int, int, int, int]] = []
+    for fraction in (0.3, 0.5, 0.7):
+        index = int(info.frame_count * fraction)
+        command = [ffmpeg, "-hide_banner", "-nostdin", "-copyts", *seek_args(info, index), "-i", str(info.path),
+                   "-map", f"0:{info.stream_index}", "-frames:v", "24", "-an", "-sn", "-dn",
+                   "-vf", "cropdetect=limit=0.1:round=2:reset=0", "-f", "null", "-"]
+        _, log = run_with_log(command, cancel)
+        found = re.findall(r"crop=(\d+):(\d+):(\d+):(\d+)", log)
+        if found:
+            boxes.append(tuple(int(v) for v in found[-1]))
+    if not boxes:
+        return None
+    w, h, x, y = max(boxes, key=lambda b: b[0] * b[1])
+    if (w, h) == (info.width, info.height) or w < 64 or h < 64:
+        return None
+    return Crop(w, h, x, y)
+
+
+SEI_FILM_GRAIN = 19
+_VCL_TYPES = range(0, 12)
+_IDR_TYPES = (7, 8)                                # IDR_W_RADL, IDR_N_LP
+_IRAP_TYPES = (7, 8, 9)                            # ... and CRA
+_LEADING_TYPES = (2, 3)                            # RADL, RASL
+_NAL_SPS, _NAL_PH = 15, 19
+
+
+class _Bits(BitReader):
+    """BitReader with the Exp-Golomb codes of H.266 headers."""
+
+    def ue(self) -> int:
+        zeros = 0
+        while self.get(1) == 0:
+            zeros += 1
+            if zeros > 31:
+                raise ValueError("bad Exp-Golomb code")
+        return (1 << zeros) - 1 + self.get(zeros)
+
+    def se(self) -> int:
+        k = self.ue()
+        return (k + 1) // 2 if k & 1 else -(k // 2)
+
+    def align(self) -> None:
+        self.get(-self.position % 8)
+
+
+def _annexb_nals(data: bytes) -> list[bytes]:
+    """NAL units of an Annex B byte stream (start code prefixed), without their start codes."""
+    starts = [m.end() for m in re.finditer(b"\x00\x00\x01", data)]
+    return [data[s:(starts[i + 1] - 3 if i + 1 < len(starts) else len(data))].rstrip(b"\x00")
+            for i, s in enumerate(starts)]
+
+
+def _poc_lsb_bits(sps: bytes) -> int:
+    """sps_log2_max_pic_order_cnt_lsb_minus4 + 4, read as vvdec reads the SPS (H.266 7.3.2.4)."""
+    r = _Bits(unescape_rbsp(sps[2:]))
+    r.get(8)                                       # sps id, vps id
+    max_sublayers_minus1 = r.get(3)
+    r.get(4)                                       # chroma format, CTU size
+    if r.get(1):                                   # sps_ptl_dpb_hrd_params_present_flag
+        r.get(7 + 1 + 8 + 1 + 1)                   # profile, tier, level, frame only, multilayer
+        if r.get(1):                               # gci_present_flag
+            r.get(71)                              # the constraint flags and idcs
+            r.get(r.get(8))                        # gci_num_reserved_bits, the reserved bits
+        r.align()
+        present = [r.get(1) for _ in range(max_sublayers_minus1)]
+        r.align()
+        r.get(8 * sum(present))                    # sublayer_level_idc
+        r.get(32 * r.get(8))                       # ptl_num_sub_profiles, general_sub_profile_idc
+    r.get(1)                                       # sps_gdr_enabled_flag
+    if r.get(1):                                   # sps_ref_pic_resampling_enabled_flag
+        r.get(1)
+    r.ue(), r.ue()                                 # picture size
+    if r.get(1):                                   # conformance window
+        for _ in range(4):
+            r.ue()
+    if r.get(1):
+        raise ValueError("subpictures are not supported")
+    r.ue()                                         # bit depth
+    r.get(2)                                       # entropy coding sync, entry point offsets
+    return r.get(4) + 4
+
+
+def _poc_lsb(rbsp: bytes, in_slice_header: bool, lsb_bits: int) -> int:
+    """ph_pic_order_cnt_lsb from a picture header (H.266 7.3.2.8)."""
+    r = _Bits(rbsp)
+    if in_slice_header and not r.get(1):           # sh_picture_header_in_slice_header_flag
+        raise LookupError("picture header in its own NAL unit")
+    irap_or_gdr = r.get(1)
+    r.get(1)                                       # ph_non_ref_pic_flag
+    if irap_or_gdr:
+        r.get(1)                                   # ph_gdr_pic_flag
+    if r.get(1):                                   # ph_inter_slice_allowed_flag
+        r.get(1)
+    r.ue()                                         # ph_pic_parameter_set_id
+    return r.get(lsb_bits)
+
+
+def _parse_fgc(payload: bytes) -> tuple[GrainSet | None, bool]:
+    """(parameters, or None if cancelled; persistence flag) of a film grain characteristics SEI."""
+    r = _Bits(payload)
+    if r.get(1):                                   # fg_characteristics_cancel_flag
+        return None, False
+    model_id = r.get(2)
+    if r.get(1):                                   # separate colour description
+        r.get(3 + 3 + 1 + 8 + 8 + 8)
+    blending = r.get(2)
+    log2_scale = r.get(4)
+    present = [r.get(1) for _ in range(3)]
+    components: list[GrainComponent | None] = []
+    for c in range(3):
+        if not present[c]:
+            components.append(None)
+            continue
+        intervals, values = r.get(8) + 1, r.get(3) + 1
+        pieces = []
+        for _ in range(intervals):
+            lower, upper = r.get(8), r.get(8)
+            pieces.append((lower, upper, [r.se() for _ in range(values)]))
+        components.append(GrainComponent(pieces))
+    return GrainSet(model_id, blending, log2_scale, components), bool(r.get(1))
+
+
+def read_grain(bitstream: bytes) -> list[GrainSet | None]:
+    """The film grain parameters in force for every picture, in display order.
+
+    FGC SEI messages sit in prefix SEI NAL units in front of their picture. The
+    display order comes from each picture's picture order count; a picture
+    without a message keeps the previous parameters when their persistence
+    flag says so (H.274), and a cancel message ends them.
+    """
+    lsb_bits = None
+    pictures: list[tuple[int, int, list]] = []     # (coded video sequence, POC, its FGC messages)
+    pending: list = []
+    cvs, prev_lsb, prev_msb, ph_poc = -1, 0, 0, None
+    for nal in _annexb_nals(bitstream):
+        if len(nal) < 2:
+            continue
+        kind, tid = nal[1] >> 3, (nal[1] & 7) - 1
+        if kind == _NAL_SPS:
+            lsb_bits = _poc_lsb_bits(nal)
+        elif kind == NAL_PREFIX_SEI:
+            for ptype, payload in parse_sei_messages(nal) or []:
+                if ptype == SEI_FILM_GRAIN:
+                    pending.append(_parse_fgc(payload))
+        elif kind == _NAL_PH or kind in _VCL_TYPES:
+            if lsb_bits is None:
+                raise ValueError("a picture comes before the SPS")
+            rbsp = unescape_rbsp(nal[2:])
+            if kind == _NAL_PH:
+                ph_poc = _poc_lsb(rbsp, False, lsb_bits)
+                continue
+            try:
+                lsb = _poc_lsb(rbsp, True, lsb_bits)
+            except LookupError:                    # its picture header came in a PH NAL unit
+                if ph_poc is None:
+                    continue                       # a further slice of the same picture
+                lsb, ph_poc = ph_poc, None
+            max_lsb = 1 << lsb_bits
+            if kind in _IDR_TYPES or (kind in _IRAP_TYPES and cvs < 0):
+                cvs, msb = cvs + 1, 0
+            elif lsb < prev_lsb and prev_lsb - lsb >= max_lsb // 2:
+                msb = prev_msb + max_lsb
+            elif lsb > prev_lsb and lsb - prev_lsb > max_lsb // 2:
+                msb = prev_msb - max_lsb
+            else:
+                msb = prev_msb
+            if tid == 0 and kind not in _LEADING_TYPES:
+                prev_lsb, prev_msb = lsb, msb
+            pictures.append((cvs, msb + lsb, pending))
+            pending = []
+    result: list[GrainSet | None] = []
+    current: GrainSet | None = None
+    for _, _, messages in sorted(pictures, key=lambda p: (p[0], p[1])):
+        if messages:
+            current, persists = messages[-1]
+            result.append(current)
+            current = current if persists else None
+        else:
+            result.append(current)
+    return result
+
+
+def make_clip(ffmpeg: str, tools: VvcTools, info: VideoInfo, start: int,
+              settings: VvcSettings, crop: Crop | None, folder: Path, cancel: CancelToken,
+              progress) -> Clip:
+    """Cut ``settings.frames`` source frames from ``start``, encode them with VVenC, decode twice."""
+    if tools.missing():
+        raise ToolError("Not found: " + ", ".join(tools.missing()) + " (run vvc\\build_vvc_tools.ps1)")
+    width, height = (crop.width, crop.height) if crop else (info.width, info.height)
+    if width % 2 or height % 2:
+        raise ValueError(f"VVenC needs an even picture size, not {width}×{height}")
+    geometry = Geometry(width, height, 10, 1, 1)          # VVenC codes 10-bit 4:2:0
+    folder.mkdir(parents=True, exist_ok=True)
+    source = folder / _FILES[SOURCE]
+
+    progress(-1, f"Reading source frames {start:,}–{start + settings.frames - 1:,}…")
+    _, log = run_with_log(_command(ffmpeg, info, start, settings.frames, geometry, crop, str(source),
+                                   with_times=True), cancel)
+    count = source.stat().st_size // geometry.frame_bytes if source.exists() else 0
+    if count == 0:
+        raise RuntimeError(f"{info.path.name}: frame {start} could not be decoded")
+    times = [float(t) for t in _PTS_TIME.findall(log)]
+    first = frame_index(info, times[0]) if times else start   # a cut file may start later
+
+    fps = info.fps
+    progress(-1, f"Encoding {count} frames with VVenC (--fga {settings.fga}, QP {settings.qp:g}, "
+                 f"{settings.preset})…")
+    started = time.perf_counter()
+    run([tools.vvencapp, "-i", str(source), "-s", f"{width}x{height}", "-c", "yuv420_10",
+         "--fps", f"{fps.numerator}/{fps.denominator}", "-f", str(count),
+         "--qp", f"{settings.qp:g}", "--preset", settings.preset,
+         "--fga", str(settings.fga), "--fgastrength", str(settings.strength),
+         "-o", str(folder / "clip.266")], cancel)
+    encode_seconds = time.perf_counter() - started
+
+    progress(-1, "Decoding with vvdec, without and with its film grain synthesis…")
+
+    def decode(which: str, synthesis: int) -> None:
+        run([tools.vvdecapp, "-b", str(folder / "clip.266"), "-o", str(folder / _FILES[which]),
+             "-fg", str(synthesis)], cancel)
+    with ThreadPoolExecutor(2) as pool:
+        jobs = [pool.submit(decode, DECODED, 0), pool.submit(decode, GRAIN, 1)]
+        grain = read_grain((folder / "clip.266").read_bytes())
+        for job in jobs:
+            job.result()
+    for which in (DECODED, GRAIN):
+        size = (folder / _FILES[which]).stat().st_size
+        if size != count * geometry.frame_bytes:
+            raise RuntimeError(f"vvdec wrote {size // geometry.frame_bytes} of {count} frames")
+    return Clip(first, count, geometry, folder, settings, crop, float(fps), grain, encode_seconds)
+
+
+@dataclass
+class FrameStats:
+    """How much grain VVenC took out of a frame and how much vvdec puts back (8-bit units)."""
+    removed: tuple[float, float, float]            # std of source − decoded, Y Cb Cr
+    added: tuple[float, float, float]              # std of grained − decoded
+    shift: tuple[float, float, float]              # mean of grained − decoded
+
+
+def frame_stats(source: Frame, decoded: Frame, grained: Frame) -> FrameStats:
+    scale = 1 << (decoded.geometry.bit_depth - 8)
+
+    def planes(a: Frame, b: Frame) -> list[np.ndarray]:
+        return [(x[::2, ::2].astype(np.float32) - y[::2, ::2]) / scale
+                for x, y in ((a.y, b.y), (a.u, b.u), (a.v, b.v))]
+    removed = planes(source, decoded)
+    added = planes(grained, decoded)
+    return FrameStats(tuple(float(np.std(d)) for d in removed), tuple(float(np.std(d)) for d in added),
+                      tuple(float(np.mean(d)) for d in added))
+
+
+def most_common_grain(clip: Clip) -> Counter:
+    """How many frames of the clip carry each distinct parameter set (by its description)."""
+    return Counter(g.describe() if g else "none" for g in clip.grain)

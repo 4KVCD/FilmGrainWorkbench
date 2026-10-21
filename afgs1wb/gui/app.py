@@ -83,8 +83,12 @@ def main() -> int:
     app.setStyle("Fusion")
     app.setPalette(_dark_palette())
     app.setStyleSheet(STYLE)
-    from .main_window import MainWindow
-    window = MainWindow()
+    if "--vvc" in sys.argv[1:]:                    # VVC's own grain: VVenC analysis + vvdec synthesis
+        from .vvc_window import VvcGrainWindow
+        window = VvcGrainWindow()
+    else:
+        from .main_window import MainWindow
+        window = MainWindow()
     install_error_handler(window)
     window.show()
     return app.exec()
