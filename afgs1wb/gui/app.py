@@ -7,8 +7,13 @@ import sys
 import time
 import traceback
 
-from PySide6.QtGui import QColor, QPalette
+from PySide6.QtCore import QSettings
+from PySide6.QtGui import QColor, QIcon, QPalette
 from PySide6.QtWidgets import QApplication, QMessageBox
+
+from .. import __version__
+from ..paths import resource
+from ..tools import load_tools
 
 STYLE = """
 QGroupBox { font-weight: 600; border: 1px solid #3a4048; border-radius: 6px; margin-top: 10px; padding: 8px 6px 6px 6px; }
@@ -76,6 +81,23 @@ def install_error_handler(window) -> None:
     sys.excepthook = hook
 
 
+def _check_installation(report: str) -> int:
+    """--check-installation FILE: write which programs were found, and their versions, to FILE."""
+    from ..vvcgrain import find_vvc_tools
+    from .about import check_installation, format_report
+    checks = check_installation(load_tools(QSettings("AFGS1Workbench", "AFGS1Workbench")), find_vvc_tools())
+    Path(report).write_text(format_report(checks) + "\n", encoding="utf-8")
+    return 0 if all(c.ok for c in checks) else 1
+
+
+def _taskbar_identity() -> None:
+    """Windows groups the app under its own taskbar icon, not python's, when run from the source."""
+    if sys.platform == "win32":
+        import ctypes
+        # The same ID in every version, so a pinned taskbar icon keeps working after an update.
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("4KVCD.FilmGrainWorkbench")
+
+
 def main() -> int:
     app = QApplication(sys.argv)
     # The application and organisation names place the data folder (saved analyses,
@@ -83,6 +105,12 @@ def main() -> int:
     app.setApplicationName("AFGS1 Grain Workbench")
     app.setOrganizationName("AFGS1Workbench")
     app.setApplicationDisplayName("Film Grain Workbench")
+    app.setApplicationVersion(__version__)
+    if "--check-installation" in sys.argv[1:]:
+        index = sys.argv.index("--check-installation")
+        return _check_installation(sys.argv[index + 1]) if index + 1 < len(sys.argv) else 2
+    _taskbar_identity()
+    app.setWindowIcon(QIcon(str(resource("icon.png"))))
     app.setStyle("Fusion")
     app.setPalette(_dark_palette())
     app.setStyleSheet(STYLE)

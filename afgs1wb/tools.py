@@ -9,6 +9,8 @@ import shutil
 import subprocess
 import threading
 
+from .paths import bundled_program
+
 _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
@@ -109,9 +111,11 @@ class Tools:
 
 
 def detect_tools() -> Tools:
-    """Best-effort discovery from PATH and a few conventional locations."""
-    tools = Tools(shutil.which("ffmpeg") or "", shutil.which("ffprobe") or "",
-                  shutil.which("mkvmerge") or "")
+    """Best-effort discovery: the app's bin folder, PATH, and MKVToolNix's install folder."""
+    def find(name: str) -> str:
+        local = bundled_program(name)
+        return str(local) if local.is_file() else (shutil.which(name) or "")
+    tools = Tools(find("ffmpeg"), find("ffprobe"), find("mkvmerge"))
     if not tools.mkvmerge:
         for root in (os.environ.get("ProgramFiles", r"C:\Program Files"),
                      os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")):
@@ -119,6 +123,15 @@ def detect_tools() -> Tools:
             if candidate.is_file():
                 tools.mkvmerge = str(candidate)
                 break
+    return tools
+
+
+def load_tools(settings) -> Tools:
+    """The programs as set under Settings → External programs (a QSettings), else as found."""
+    found, tools = detect_tools(), Tools()
+    for name in Tools.LABELS:
+        saved = settings.value(f"tools/{name}", "")
+        setattr(tools, name, saved if saved and Path(saved).is_file() else getattr(found, name))
     return tools
 
 

@@ -5,3 +5,4 @@ tests/.cache/
 .pytest_cache/
 bin/
 third_party/
+build/

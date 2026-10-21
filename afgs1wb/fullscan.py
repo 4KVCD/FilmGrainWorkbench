@@ -36,6 +36,7 @@ from . import synth
 from .alignment import check_alignment
 from .frames import Crop, Frame, Geometry, filter_chain, read_frames, seek_args
 from .grain_params import GrainParams, TableEntry, bulk_objects, format_grain_table, parse_grain_table
+from .paths import bundled_program, missing_program_hint
 from .probe import VideoInfo
 from .tools import Cancelled, CancelToken, ToolError, Tools, cpu_count, run
 
@@ -120,7 +121,7 @@ class TimelineModel:
 # --------------------------------------------------------------------------- helpers
 
 def analyzer_path() -> Path:
-    return Path(__file__).resolve().parents[1] / "bin" / "afgs1_grain_analyzer.exe"
+    return bundled_program("afgs1_grain_analyzer")
 
 
 def default_threads() -> int:
@@ -324,7 +325,7 @@ def analyze_every_frame(tools: Tools, source: VideoInfo, encoded: VideoInfo, off
     started = time.perf_counter()
     analyzer = Path(analyzer or analyzer_path())
     if not analyzer.is_file():
-        raise ToolError(f"The grain analyzer is not built ({analyzer}). Run analyzer/build.py.")
+        raise ToolError(f"The grain analyzer is missing ({analyzer}). {missing_program_hint()}")
     threads = threads or default_threads()
     first, last = frame_range(encoded, source, offset)
     work_dir.mkdir(parents=True, exist_ok=True)

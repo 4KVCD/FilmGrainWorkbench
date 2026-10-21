@@ -16,6 +16,7 @@ from ..afgs1 import picture_seed
 from ..frames import read_frame
 from ..fullscan import analyze_every_frame, analyzer_path, cache_key, checkpoint_frame, estimate_seconds
 from ..mux import WriteReport, write_afgs1_mkv
+from ..paths import missing_program_hint
 from ..probe import probe
 from ..tools import keep_awake
 from ..tuning import GrainPlan, TimelinePlan
@@ -51,7 +52,7 @@ class Writer:
 
     def _every_frame_text(self) -> str:
         if not analyzer_path().is_file():
-            return "The grain analyzer is not built yet: run analyzer\\build.py."
+            return f"The grain analyzer is missing. {missing_program_hint()}"
         if not (self.encoded and self.source):
             return "Writing analyses the grain of every frame, like libaom's encoder, then adds it."
         if self.encoded.codec != "vvc":

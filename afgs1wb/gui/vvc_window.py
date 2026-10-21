@@ -30,10 +30,11 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog
 from .. import display
 from ..frames import Crop, Frame, Geometry, read_frames
 from ..probe import VideoInfo, probe
-from ..tools import Tools, ToolError, detect_tools
+from ..tools import Tools, ToolError, load_tools
 from ..vvcgrain import (DECODED, FGA_MODES, GRAIN as GRAIN_FILE, PRESETS, SOURCE as SOURCE_FILE, Clip,
                         FrameStats, SceneCut, VvcSettings, cut_scene, detect_black_bars, encode_scene,
                         find_vvc_tools, frame_stats, open_work_dir)
+from ..paths import missing_program_hint
 from .frame_pane import SHORTCUT_HELP, FramePane, StatusBar, install_viewer_shortcuts, timecode, to_qimage
 from .jobs import Job, running
 from .viewer import ENCODED, GRAIN, GRAIN_ONLY, SOURCE, PreviewState, ViewerWindow
@@ -265,12 +266,7 @@ class VvcGrainWindow(QMainWindow):
 
     # ------------------------------------------------------------------ settings
     def _load_tools(self) -> Tools:
-        found = detect_tools()
-        for name in ("ffmpeg", "ffprobe"):
-            saved = self.settings.value(f"tools/{name}", "")
-            if saved and Path(saved).is_file():
-                setattr(found, name, saved)
-        return found
+        return load_tools(self.settings)
 
     def reload_tools(self) -> None:
         """ffmpeg and ffprobe as set up in Settings → External programs (shared with the AV1 tab)."""
@@ -278,10 +274,15 @@ class VvcGrainWindow(QMainWindow):
         self._update_tools()
 
     def _update_tools(self) -> None:
-        missing = self.tools.missing("ffmpeg", "ffprobe") + self.vvc_tools.missing()
-        self.tools_banner.setVisible(bool(missing))
-        self.tools_banner.setText("Missing: " + ", ".join(missing) + ". vvencapp and vvdecapp are built by "
-                                  "vvc\\build_vvc_tools.ps1.")
+        problems = []
+        external = self.tools.missing("ffmpeg", "ffprobe")
+        if external:
+            problems.append(f"Missing: {', '.join(external)} (Settings → External programs).")
+        bundled = self.vvc_tools.missing()
+        if bundled:
+            problems.append(f"Missing: {', '.join(bundled)}. {missing_program_hint()}")
+        self.tools_banner.setVisible(bool(problems))
+        self.tools_banner.setText(" ".join(problems))
         self.tools_label.setText(f"vvencapp: {self.vvc_tools.vvencapp or '—'}\n"
                                  f"vvdecapp: {self.vvc_tools.vvdecapp or '—'}")
 

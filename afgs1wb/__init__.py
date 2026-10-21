@@ -1,3 +1,3 @@
-"""AFGS1 film grain workbench for VVC encodes."""
+"""Film Grain Workbench: VVC's own film grain, and AV1 film grain (AFGS1) for VVC encodes."""
 
-__version__ = "0.1.0"
+__version__ = "1.0.0"

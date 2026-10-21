@@ -25,8 +25,9 @@ from ..alignment import detect_offset
 from ..fullscan import TimelineModel, analyzer_path, default_threads
 from ..frames import Crop, Frame, source_crop_for
 from ..grain_params import GrainParams, TableEntry, format_grain_table
+from ..paths import missing_program_hint
 from ..probe import VideoInfo, probe
-from ..tools import Tools, ToolError, detect_tools
+from ..tools import Tools, ToolError, load_tools
 from ..tuning import FramePlan, GrainPlan, TimelinePlan, Tuning, entry_sigmas, sigma_in_8bit_units
 from .av1_frames import FrameLoader
 from .av1_write import Writer, Written
@@ -347,12 +348,7 @@ class MainWindow(FrameLoader, Writer, QMainWindow):
 
     # ------------------------------------------------------------------ settings
     def _load_tools(self) -> Tools:
-        found = detect_tools()
-        tools = Tools()
-        for name in Tools.LABELS:
-            saved = self.settings.value(f"tools/{name}", "")
-            setattr(tools, name, saved if saved and Path(saved).is_file() else getattr(found, name))
-        return tools
+        return load_tools(self.settings)
 
     def _restore(self) -> None:
         s = self.settings
@@ -534,7 +530,7 @@ class MainWindow(FrameLoader, Writer, QMainWindow):
         if self.encoded.codec != "vvc":
             return "The encode is not VVC."
         if not analyzer_path().is_file():
-            return "The grain analyzer is not built: run analyzer\\build.py."
+            return f"The grain analyzer is missing. {missing_program_hint()}"
         if self.tools.missing("ffmpeg", "mkvmerge"):
             return "Needs ffmpeg and mkvmerge from MKVToolNix (Settings → External programs)."
         return ""

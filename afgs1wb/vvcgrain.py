@@ -30,6 +30,7 @@ import numpy as np
 from .bits import BitReader
 from .frames import (PTS_TIME, Crop, Frame, Geometry, ffmpeg_command, frame_index, seek_args,
                      split_planes)
+from .paths import bundled_program, missing_program_hint
 from .probe import VideoInfo
 from .tools import CancelToken, ToolError, run, run_with_log
 from .vvc import NAL_PREFIX_SEI, parse_sei_messages, unescape_rbsp
@@ -53,11 +54,9 @@ class VvcTools:
 
 
 def find_vvc_tools() -> VvcTools:
-    """vvencapp / vvdecapp from the app's bin folder (built by vvc/build_vvc_tools.ps1), else PATH."""
-    bin_dir = Path(__file__).resolve().parents[1] / "bin"
-
+    """vvencapp / vvdecapp from the app's bin folder (see build.py), else PATH."""
     def find(name: str) -> str:
-        local = bin_dir / f"{name}.exe"
+        local = bundled_program(name)
         return str(local) if local.is_file() else (shutil.which(name) or "")
     return VvcTools(find("vvencapp"), find("vvdecapp"))
 
@@ -453,7 +452,7 @@ def encode_scene(tools: VvcTools, cut: SceneCut, settings: VvcSettings, cancel: 
     The folder is deleted again if anything fails or the work is cancelled.
     """
     if tools.missing():
-        raise ToolError("Not found: " + ", ".join(tools.missing()) + " (run vvc\\build_vvc_tools.ps1)")
+        raise ToolError("Not found: " + ", ".join(tools.missing()) + ". " + missing_program_hint())
     folder = cut.folder / f"fga{settings.fga}-{time.monotonic_ns()}"
     folder.mkdir()
     try:

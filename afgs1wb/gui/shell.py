@@ -6,6 +6,7 @@ from PySide6.QtCore import QSettings, Qt
 from PySide6.QtGui import QShortcut
 from PySide6.QtWidgets import QMainWindow, QTabWidget
 
+from .about import APP_NAME, AboutDialog, InstallationDialog
 from .main_window import MainWindow
 from .vvc_window import VvcGrainWindow
 
@@ -15,7 +16,7 @@ VVC_TAB, AV1_TAB = 0, 1
 class Workbench(QMainWindow):
     def __init__(self, settings: QSettings | None = None) -> None:
         super().__init__()
-        self.setWindowTitle("Film Grain Workbench")
+        self.setWindowTitle(APP_NAME)
         self.settings = settings or QSettings("AFGS1Workbench", "AFGS1Workbench")
         self.av1 = MainWindow(self.settings)
         self.vvc = VvcGrainWindow(self.settings)
@@ -34,6 +35,9 @@ class Workbench(QMainWindow):
         self.setCentralWidget(self.tabs)
         settings_menu = self.menuBar().addMenu("&Settings")
         settings_menu.addAction("External programs…", self.av1.edit_tools)
+        help_menu = self.menuBar().addMenu("&Help")
+        help_menu.addAction("Check installation…", self._check_installation)
+        help_menu.addAction(f"About {APP_NAME}", lambda: AboutDialog(self).exec())
         self.av1.tools_changed.connect(self._tools_changed)     # from the menu or the AV1 tab's banner
         if self.settings.value("shell/geometry"):
             self.restoreGeometry(self.settings.value("shell/geometry"))
@@ -65,6 +69,9 @@ class Workbench(QMainWindow):
 
     def _tools_changed(self) -> None:
         self.vvc.reload_tools()                             # the VVC tab uses the same ffmpeg / ffprobe
+
+    def _check_installation(self) -> None:
+        InstallationDialog(self.av1.tools, self.vvc.vvc_tools, self).exec()
 
     def closeEvent(self, event) -> None:
         # Every tab is asked before any is shut down: the AV1 tab asks while it is writing,
