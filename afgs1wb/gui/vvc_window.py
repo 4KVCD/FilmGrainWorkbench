@@ -22,7 +22,7 @@ import os
 import shutil
 
 import numpy as np
-from PySide6.QtCore import QSettings, QStandardPaths, Qt, QTimer
+from PySide6.QtCore import QSettings, Qt, QTimer
 from PySide6.QtGui import QFont, QImage, QKeySequence, QShortcut
 from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout,
                                QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMainWindow,
@@ -36,7 +36,7 @@ from ..tools import Tools, ToolError, detect_tools
 from ..vvcgrain import (DECODED, FGA_MODES, GRAIN as GRAIN_FILE, PRESETS, SOURCE as SOURCE_FILE, Clip,
                         SceneCut, VvcSettings, cut_scene, detect_black_bars, encode_scene, find_vvc_tools,
                         frame_stats, open_work_dir)
-from .jobs import Job
+from .jobs import Job, running
 from .viewer import ENCODED, GRAIN, GRAIN_ONLY, SOURCE, FrameView, PreviewState, ViewerWindow
 
 VIEW_NAMES = {SOURCE: "Source", ENCODED: "VVC, grain removed", GRAIN: "VVC + grain synthesis",
@@ -59,7 +59,7 @@ class Scene:
     start: int
     frames: int
     crop: Crop | None
-    base: tuple                                    # VvcSettings.without_mode() the encodes use
+    base: tuple[int, float, str]                   # VvcSettings.coding() the encodes use
     folder: Path
     cut: SceneCut | None = None
     clips: dict[int, Clip] = field(default_factory=dict)      # by --fga, encoded with ``base``
@@ -70,7 +70,11 @@ class Scene:
         return start <= index < start + count
 
     def settings(self, fga: int) -> VvcSettings:
-        return VvcSettings(fga, *self.base)
+        return VvcSettings(fga, *self.base, self.frames)
+
+    def holds(self, index: int, frames: int, crop: Crop | None) -> bool:
+        """Whether Encode this scene at ``index`` would cut these same frames again."""
+        return self.covers(index) and (self.frames, self.crop) == (frames, crop)
 
 
 def _qimage(rgb: np.ndarray) -> QImage:
@@ -90,7 +94,6 @@ class VvcGrainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("VVC Grain Analyzer — VVenC film grain analysis + vvdec synthesis")
         self.settings = settings or QSettings("AFGS1Workbench", "AFGS1Workbench")
-        self.data_dir = Path(QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppDataLocation))
         self.tools = self._load_tools()
         self.vvc_tools = find_vvc_tools()
         self.work_root, self.work_lock = open_work_dir(work_dir)
@@ -108,7 +111,7 @@ class VvcGrainWindow(QMainWindow):
         self.job_key: tuple | None = None
         self.frame_job: Job | None = None
         self.frame_pending = False
-        self.source_frames: OrderedDict[tuple, Frame] = OrderedDict()
+        self.source_frames: OrderedDict[tuple[int, Crop | None], Frame] = OrderedDict()
         self.last_read = 0
         self.preferred_mode = GRAIN                 # the view chosen last, restored inside a scene
         self.state = PreviewState(VIEW_NAMES)
@@ -329,10 +332,6 @@ class VvcGrainWindow(QMainWindow):
 
     def _restore(self) -> None:
         s = self.settings
-        if s.value("vvc/geometry"):
-            self.restoreGeometry(s.value("vvc/geometry"))
-        else:
-            self.resize(1600, 980)
         index = self.fga_combo.findData(int(s.value("vvc/fga", 2)))
         self.fga_combo.setCurrentIndex(max(0, index))
         self.strength_spin.setValue(int(s.value("vvc/strength", 100)))
@@ -345,7 +344,6 @@ class VvcGrainWindow(QMainWindow):
         if not self.started:
             return      # restoring the controls fires their change signals: they would save an empty source
         s = self.settings
-        s.setValue("vvc/geometry", self.saveGeometry())
         s.setValue("vvc/source", self.source_edit.text())
         s.setValue("vvc/fga", self.fga_combo.currentData())
         s.setValue("vvc/strength", self.strength_spin.value())
@@ -450,23 +448,29 @@ class VvcGrainWindow(QMainWindow):
             self._show()
 
     def _apply_settings(self) -> None:
-        """Inside the encoded scene: a new mode is shown (encoded already or next), other changed
-        settings encode the scene's three modes again; a new length makes a new scene. Outside it,
-        nothing is encoded."""
-        scene, settings = self.scene, self._vvc_settings()
+        """Inside the encoded scene, new strength, QP or preset encode its three modes again.
+
+        Outside it nothing is encoded, and a new scene length waits for Encode
+        this scene: it decides which frames the next scene holds.
+        """
+        scene = self.scene
         if scene and scene.covers(self.current_index):
-            if settings.frames != scene.frames:
-                self._new_scene()
-                return
-            if settings.without_mode() != scene.base:
-                for fga, clip in scene.clips.items():
-                    old = scene.older.pop(fga, None)
-                    if old:
-                        self.retired.append(old.folder)
-                    scene.older[fga] = clip
-                scene.clips, scene.base, self.stopped = {}, settings.without_mode(), False
-                self._remove_retired()
+            self._recode(scene, self._vvc_settings().coding())
         self._show()
+
+    def _recode(self, scene: Scene, coding: tuple[int, float, str]) -> None:
+        """Encode the scene's modes again with other coding settings; the current ones stay
+        on screen (as ``older``) until each replacement is ready."""
+        if coding == scene.base:
+            return
+        self.stopped = False
+        for fga, clip in scene.clips.items():
+            old = scene.older.pop(fga, None)
+            if old:
+                self.retired.append(old.folder)
+            scene.older[fga] = clip
+        scene.clips, scene.base = {}, coding
+        self._remove_retired()
 
     # ------------------------------------------------------------------ encoding
     def _wanted_crop(self) -> Crop | None:
@@ -481,6 +485,16 @@ class VvcGrainWindow(QMainWindow):
     def _encode_scene(self) -> None:
         if not self.source or self.vvc_tools.missing():
             return
+        _, length = self._scene_range()
+        scene = self.scene
+        if scene and scene.holds(self.current_index, length, self._wanted_crop()):
+            # The same frames: continue a stopped scene, or encode it with the current settings,
+            # keeping its cut and every mode already encoded with them.
+            self.stopped = False
+            self._recode(scene, self._vvc_settings().coding())
+            self.preferred_mode = GRAIN
+            self._show()
+            return
         self._new_scene()
 
     def _new_scene(self) -> None:
@@ -488,7 +502,7 @@ class VvcGrainWindow(QMainWindow):
         self._retire_scene()
         self.scene_count += 1
         self.scene = Scene(self.scene_count, start, length, self._wanted_crop(),
-                           self._vvc_settings().without_mode(), self.work_root / f"scene-{self.scene_count}")
+                           self._vvc_settings().coding(), self.work_root / f"scene-{self.scene_count}")
         self.stopped = False
         self.preferred_mode = GRAIN
         self._show()
@@ -501,9 +515,9 @@ class VvcGrainWindow(QMainWindow):
 
     def _remove_retired(self) -> None:
         """Delete replaced files, unless a frame is being read from them or a job still writes there."""
-        if self.frame_job and self.frame_job.isRunning():
+        if running(self.frame_job):
             return                                  # again when that frame job finishes
-        busy = self.job_folder if self.job and self.job.isRunning() else None
+        busy = self.job_folder if running(self.job) else None
         keep = []
         for folder in self.retired:
             if busy and (busy == folder or folder in busy.parents):
@@ -517,7 +531,9 @@ class VvcGrainWindow(QMainWindow):
         if not self.source:
             return
         if self.crop_check.isChecked() and not self.crop_known:
+            # The whole picture meanwhile; the cropped one follows when the bars are known.
             self._start_job(("crop", str(self.source.path)), self._detect_bars())
+            self._render_source(self.current_index)
             return
         self._schedule()
         index, scene = self.current_index, self.scene
@@ -531,8 +547,8 @@ class VvcGrainWindow(QMainWindow):
 
     def _schedule(self) -> None:
         """Start the scene's next piece of work: the cut, then the selected mode, then the other two."""
-        if self.job and self.job.isRunning():
-            if not self._job_wanted(self.job_key):
+        if running(self.job):
+            if not self._job_wanted(self.job_key) or self._job_blocks_selected(self.job_key):
                 self.job.cancel()                   # its finished signal schedules again
             return
         scene = self.scene
@@ -545,6 +561,16 @@ class VvcGrainWindow(QMainWindow):
         missing = [m for m in [selected, *sorted(FGA_MODES)] if m not in scene.clips]
         if missing:
             self._start_job(("encode", scene.ident, scene.base, missing[0]), self._encode(scene, missing[0]))
+
+    def _job_blocks_selected(self, key: tuple | None) -> bool:
+        """A background encode of another mode, while the mode chosen in the list is still missing.
+
+        Cancelling it shows the chosen mode a few seconds sooner; the cancelled
+        mode is encoded again afterwards.
+        """
+        scene, selected = self.scene, int(self.fga_combo.currentData())
+        return bool(key and key[0] == "encode" and scene and key[1] == scene.ident
+                    and key[3] != selected and selected not in scene.clips and not self.stopped)
 
     def _job_wanted(self, key: tuple | None) -> bool:
         scene = self.scene
@@ -589,7 +615,7 @@ class VvcGrainWindow(QMainWindow):
             return encode_scene(vvc, scene.cut, settings, token, progress)
 
         def done(clip: Clip):
-            if self.scene is not scene or scene.base != settings.without_mode():
+            if self.scene is not scene or scene.base != settings.coding():
                 self.retired.append(clip.folder)    # settings or scene changed meanwhile
                 return
             old = scene.older.pop(fga, None)
@@ -605,14 +631,14 @@ class VvcGrainWindow(QMainWindow):
 
     def _start_job(self, key: tuple, spec) -> None:
         name, work, done, folder = spec
-        if self.job and self.job.isRunning():
+        if running(self.job):
             return
         self.job_key, self.job_folder = key, folder
         self.job = Job(name, work, self)
         self.job.progress.connect(lambda f, m: self.status_label.setText(m))
         self.job.succeeded.connect(done)
         self.job.failed.connect(lambda msg, n=name, k=key: self._failed(n, k, msg))
-        self.job.cancelled.connect(lambda: self.status_label.setText("Cancelled."))
+        self.job.cancelled.connect(self._job_cancelled)
         self.job.finished.connect(self._job_finished)
         self.progress.show()
         self.cancel_button.show()
@@ -627,6 +653,10 @@ class VvcGrainWindow(QMainWindow):
         self._update_scene_label()
         QTimer.singleShot(0, self._show)            # the next piece of work, or the frame asked for meanwhile
 
+    def _job_cancelled(self) -> None:
+        if self.stopped:                            # Cancel pressed; other cancels are rescheduling
+            self.status_label.setText("Cancelled.")
+
     def _failed(self, name: str, key: tuple, message: str) -> None:
         self.status_label.setText(f"{name} failed.")
         if key[0] == "crop":
@@ -638,7 +668,7 @@ class VvcGrainWindow(QMainWindow):
 
     def _stop(self) -> None:
         """The Cancel button: stop the scene's work until Encode this scene or a setting asks again."""
-        if self.job and self.job.isRunning():
+        if running(self.job):
             self.stopped = True
             self.job.cancel()
 
@@ -658,13 +688,13 @@ class VvcGrainWindow(QMainWindow):
 
     def _render_source(self, index: int) -> None:
         """Show the source frame alone (no encode): browsing for a scene."""
-        if self.frame_job and self.frame_job.isRunning():
+        if running(self.frame_job):
             self.frame_pending = True
             return
         self.frame_pending = False
         src, crop, g, ffmpeg = self.source, self._wanted_crop(), self._geometry(), self.tools.ffmpeg
         converter = self._converter(g)
-        cached = self.source_frames.get(index)
+        cached = self.source_frames.get((index, crop))
         backwards = index < self.last_read
         self.last_read = index
         first = max(0, index - PREFETCH + 1) if backwards else index
@@ -678,16 +708,16 @@ class VvcGrainWindow(QMainWindow):
             return index, frames, _qimage(converter.to_rgb(frame.y, frame.u, frame.v))
 
         job = Job("Frame", work, self)
-        job.succeeded.connect(lambda result: self._source_ready(*result))
+        job.succeeded.connect(lambda result, c=crop: self._source_ready(*result, c))
         job.failed.connect(lambda msg: self.state.clear(f"Could not show frame {index:,}:\n\n{msg}"))
         job.finished.connect(self._frame_job_finished)
         self.frame_job = job
         job.start()
 
-    def _source_ready(self, index: int, frames: list[Frame], image: QImage) -> None:
+    def _source_ready(self, index: int, frames: list[Frame], image: QImage, crop: Crop | None) -> None:
         for f in frames:
-            self.source_frames[f.index] = f
-            self.source_frames.move_to_end(f.index)
+            self.source_frames[(f.index, crop)] = f
+            self.source_frames.move_to_end((f.index, crop))
         while len(self.source_frames) > SOURCE_CACHE:
             self.source_frames.popitem(last=False)
         if index != self.current_index:
@@ -701,7 +731,7 @@ class VvcGrainWindow(QMainWindow):
             text = ("Source frame. Press Encode this scene (E) to encode the frames around it with VVenC "
                     "and see them without and with the grain synthesis.")
         self.info_label.setText(text)
-        if not (self.job and self.job.isRunning()):
+        if not running(self.job):
             self.status_label.setText(f"Frame {index:,}.")
         self._update_scene_label()
 
@@ -709,7 +739,7 @@ class VvcGrainWindow(QMainWindow):
         if not self.source:
             self.scene_label.setText("")
             return
-        scene, key = self.scene, self.job_key if self.job and self.job.isRunning() else None
+        scene, key = self.scene, self.job_key if running(self.job) else None
         start, length = self._scene_range()
         text = f"Encodes frames {start:,}–{start + length - 1:,} ({length / float(self.source.fps):.1f} s)."
         if scene:
@@ -725,23 +755,22 @@ class VvcGrainWindow(QMainWindow):
             where = "This scene" if scene.covers(self.current_index) else "Encoded scene"
             text = f"{where}: frames {first:,}–{first + count - 1:,}. {modes}."
             if scene.covers(self.current_index):
-                if scene.base != self._vvc_settings().without_mode():
+                if scene.base != self._vvc_settings().coding():
                     text += " Encoded with other settings than these: press Encode this scene to use them."
                 elif scene.older and int(self.fga_combo.currentData()) not in scene.clips:
                     text += " Shown with the earlier settings until the new encode is ready."
+                if self.frames_spin.value() != scene.frames:
+                    text += (f" The new scene length ({self.frames_spin.value()}) applies when Encode this "
+                             "scene is pressed again.")
             else:
                 text += f" Encode this scene would encode frames {start:,}–{start + length - 1:,}."
         self.scene_label.setText(text)
 
     def _render(self, clip: Clip, index: int) -> None:
-        if self.frame_job and self.frame_job.isRunning():
+        if running(self.frame_job):
             self.frame_pending = True
             return
         self.frame_pending = False
-        if index < clip.start:
-            self.state.clear(f"Frame {index:,} cannot be decoded from the source (a cut file starts with "
-                             "pictures that need earlier frames).")
-            return
         g = clip.geometry
         converter = self._converter(g)
 
@@ -794,7 +823,7 @@ class VvcGrainWindow(QMainWindow):
             f"Scene: frames {clip.start:,}–{clip.start + clip.count - 1:,}, {n_sets} parameter "
             f"set{'s' if n_sets != 1 else ''}; --fga {s.fga}, {s.strength} %, QP {s.qp:g}, {s.preset}; "
             f"{clip.kbps:,.0f} kb/s, encoded in {clip.encode_seconds:.1f} s.")
-        if not (self.job and self.job.isRunning()):
+        if not running(self.job):
             self.status_label.setText(f"Frame {index:,}.")
 
     # ------------------------------------------------------------------ view modes
@@ -816,17 +845,27 @@ class VvcGrainWindow(QMainWindow):
             self._install_shortcuts(self.viewer_window, self.viewer_window.view)
         self.viewer_window.show_sized()
 
-    def closeEvent(self, event) -> None:
+    def can_close(self) -> bool:
+        """Nothing here needs asking: a scene is quick to encode again."""
+        return True
+
+    def shutdown(self) -> None:
+        """Stop the work and delete the temporary files (the scene, the work folder)."""
         self._save()
         for job in (self.job, self.frame_job):
-            if job and job.isRunning():
+            if running(job):
                 job.cancel()
                 job.wait(10000)
         if self.viewer_window:
             self.viewer_window.close()
-        self.frame_job = None
-        self.job = None
+        self.frame_job = self.job = None
         self._retire_scene()
         self.work_lock.close()
         shutil.rmtree(self.work_root, ignore_errors=True)
+
+    def closeEvent(self, event) -> None:
+        if not self.can_close():
+            event.ignore()
+            return
+        self.shutdown()
         event.accept()

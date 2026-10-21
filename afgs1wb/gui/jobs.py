@@ -4,16 +4,25 @@ from __future__ import annotations
 
 import traceback
 
+import shiboken6
 from PySide6.QtCore import QThread, Signal
 
 from ..tools import CancelToken, Cancelled, ToolError
+
+
+def running(job: "Job | None") -> bool:
+    """Whether ``job`` is still running. A finished Job deletes itself, so an old
+    reference to one reads as not running instead of raising."""
+    return job is not None and shiboken6.isValid(job) and job.isRunning()
 
 
 class Job(QThread):
     """Runs ``fn(token, progress)`` off the GUI thread.
 
     ``progress(fraction, message)`` may be called from any thread; fraction
-    is 0..1, or a negative number for "busy, no percentage".
+    is 0..1, or a negative number for "busy, no percentage". A finished job
+    deletes itself (it is parented to a window, which would otherwise keep
+    every job of the session); check it with :func:`running`.
     """
     progress = Signal(float, str)
     succeeded = Signal(object)
@@ -25,6 +34,7 @@ class Job(QThread):
         self.name = name
         self.fn = fn
         self.token = CancelToken()
+        self.finished.connect(self.deleteLater)
 
     def cancel(self) -> None:
         self.token.cancel()

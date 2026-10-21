@@ -11,6 +11,8 @@ from PySide6.QtCore import QSettings, Qt  # noqa: E402
 from PySide6.QtTest import QTest  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
+from afgs1wb.gui.jobs import running  # noqa: E402
+
 
 @pytest.fixture(scope="module")
 def qapp():
@@ -38,7 +40,7 @@ def test_full_workflow(qapp, tools, need, grainy_source, grainy_clip, tmp_path):
     settings = QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat)
     w = MainWindow(settings, tmp_path / "data")
     w.show()
-    idle = lambda: not (w.frame_job and w.frame_job.isRunning()) and not w.frame_timer.isActive()
+    idle = lambda: not running(w.frame_job) and not w.frame_timer.isActive()
 
     w.source_edit.setText(str(grainy_source))
     w._load_video("source")
@@ -59,8 +61,9 @@ def test_full_workflow(qapp, tools, need, grainy_source, grainy_clip, tmp_path):
 
     start = w.current_index
     QTest.keyClick(w, Qt.Key.Key_Period)
-    wait_for(qapp, lambda: idle() and w.current_index == start + 1)
-    assert start + 1 in w.estimates                     # a new frame gets its own estimate
+    # A new frame gets its own estimate. It is made in a second job, started when the
+    # frame's job finishes: between the two nothing runs, so wait for the estimate itself.
+    wait_for(qapp, lambda: idle() and w.current_index == start + 1 and start + 1 in w.estimates)
 
     # a new offset pairs other source frames: the estimates are made again
     w.offset_spin.setValue(1)
@@ -96,7 +99,7 @@ def test_every_frame_workflow(qapp, tools, need, grainy_source, grainy_clip, tmp
     settings = QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat)
     w = MainWindow(settings, tmp_path / "data")
     w.show()
-    idle = lambda: not (w.frame_job and w.frame_job.isRunning()) and not w.frame_timer.isActive()
+    idle = lambda: not running(w.frame_job) and not w.frame_timer.isActive()
     w.source_edit.setText(str(grainy_source))
     w._load_video("source")
     w.encoded_edit.setText(str(grainy_clip))
@@ -161,7 +164,7 @@ def test_each_pair_keeps_its_frame_offset_and_shows_how_well_frames_match(
 
     settings = QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat)
     w = MainWindow(settings, tmp_path / "data")
-    idle = lambda: not (w.frame_job and w.frame_job.isRunning()) and not w.frame_timer.isActive()
+    idle = lambda: not running(w.frame_job) and not w.frame_timer.isActive()
     w.source_edit.setText(str(grainy_source)); w._load_video("source")
     w.encoded_edit.setText(str(grainy_clip)); w._load_video("encoded")
     wait_for(qapp, lambda: idle() and ENCODED in w.state.images)

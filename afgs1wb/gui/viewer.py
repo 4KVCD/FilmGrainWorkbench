@@ -52,9 +52,6 @@ class PreviewState(QObject):
         self.changed.emit()
         return True
 
-    def toggle_grain(self, towards_grain: bool) -> bool:
-        return self.set_mode(GRAIN if towards_grain else ENCODED)
-
     @property
     def pixmap(self) -> QPixmap | None:
         return self.images.get(self.mode)
@@ -90,10 +87,6 @@ class FrameView(QGraphicsView):
         self.message.setStyleSheet("color: #9aa4ad; font-size: 11pt;")
         state.changed.connect(self.refresh)
         self.refresh()
-
-    @property
-    def zoom(self) -> float:
-        return self._zoom
 
     def refresh(self) -> None:
         pixmap = self.state.pixmap

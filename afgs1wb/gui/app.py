@@ -78,8 +78,11 @@ def install_error_handler(window) -> None:
 
 def main() -> int:
     app = QApplication(sys.argv)
+    # The application and organisation names place the data folder (saved analyses,
+    # errors.log): they stay as they were. What the user sees is the display name.
     app.setApplicationName("AFGS1 Grain Workbench")
     app.setOrganizationName("AFGS1Workbench")
+    app.setApplicationDisplayName("Film Grain Workbench")
     app.setStyle("Fusion")
     app.setPalette(_dark_palette())
     app.setStyleSheet(STYLE)

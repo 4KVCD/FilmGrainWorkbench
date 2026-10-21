@@ -1,23 +1,24 @@
-"""VVC's own film grain: VVenC's analysis (--fga) and vvdec's synthesis, on short clips.
+"""VVC's own film grain: VVenC's analysis (--fga) and vvdec's synthesis, scene by scene.
 
-For the frame being looked at, a clip of consecutive source frames around it
-is encoded by vvencapp with film grain analysis on, which writes the measured
-grain as an H.274 film grain characteristics (FGC) SEI message. vvdecapp then
-decodes the clip twice: without the grain synthesis (the picture after VVenC
-removed the grain: its MCTF pre-filter plus coding at the chosen QP) and with
-it (what a decoder that synthesises the grain shows). The grain parameters each
-frame carries are read from the bitstream (ffmpeg drops the auto-regressive model).
+A scene (a short run of consecutive source frames) is cut from the source once
+and encoded by vvencapp in each film grain analysis mode, which writes the
+measured grain as an H.274 film grain characteristics (FGC) SEI message.
+vvdecapp decodes every encode twice: without the grain synthesis (the picture
+after VVenC removed the grain: its MCTF pre-filter plus coding at the chosen QP)
+and with it (what a decoder that synthesises the grain shows). The grain
+parameters each frame carries are read from the bitstream (ffmpeg drops the
+auto-regressive model).
 
 vvencapp and vvdecapp are looked for in the app's bin folder, then on PATH.
 """
 
 from __future__ import annotations
 
-from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from fractions import Fraction
 from pathlib import Path
+import os
 import re
 import shutil
 import tempfile
@@ -61,16 +62,20 @@ def find_vvc_tools() -> VvcTools:
 
 @dataclass(frozen=True)
 class VvcSettings:
-    """What VVenC is asked to do. Changing any of these encodes the clip again."""
+    """What VVenC is asked to do for one encode."""
     fga: int = 2                  # --fga: 1 VTM analysis, 2 calibrated, 3 auto-regressive model
     strength: int = 100           # --fgastrength, percent of the analysed grain
     qp: float = 28.0
     preset: str = "faster"
     frames: int = 33              # scene length: one 32-frame GOP plus the next intra frame
 
-    def without_mode(self) -> tuple:
-        """Everything but --fga: the encodes of the three modes of a scene share it."""
-        return self.strength, self.qp, self.preset, self.frames
+    def coding(self) -> tuple[int, float, str]:
+        """Strength, QP and preset: what the three modes' encodes of a scene share.
+
+        The analysis mode and the scene length are not part of it: a scene holds
+        an encode per mode, and its length is fixed when it is cut.
+        """
+        return self.strength, self.qp, self.preset
 
 
 @dataclass
@@ -97,11 +102,13 @@ class GrainSet:
                 continue
             parts = []
             for lower, upper, values in comp.pieces:
-                rest = ""
-                if self.model_id == 0 and len(values) >= 3:
-                    rest = f" cut-off H{values[1]} V{values[2]}"
-                elif len(values) > 1:
-                    rest = " AR " + " ".join(str(v) for v in values[1:])
+                if self.model_id == 0:
+                    # H.274: a missing horizontal cut-off is 8, a missing vertical one equals the horizontal
+                    horizontal = values[1] if len(values) > 1 else 8
+                    vertical = values[2] if len(values) > 2 else horizontal
+                    rest = f" cut-off H{horizontal} V{vertical}"
+                else:
+                    rest = " AR " + " ".join(str(v) for v in values[1:]) if len(values) > 1 else ""
                 parts.append(f"{lower}–{upper}: {values[0] if values else 0}{rest}")
             lines.append(f"{name}: " + "; ".join(parts))
         return "\n".join(lines)
@@ -116,6 +123,7 @@ class SceneCut:
     crop: Crop | None
     fps: Fraction
     folder: Path
+    hdr: str = "off"                               # vvencapp --hdr, from the source's colour tags
 
     @property
     def source_file(self) -> Path:
@@ -161,31 +169,56 @@ class Clip:
         k = index - self.start
         return self.grain[k] if 0 <= k < len(self.grain) else None
 
-    def remove(self) -> None:
-        shutil.rmtree(self.folder, ignore_errors=True)
-
 
 WORK_PREFIX = "afgs1wb-vvc-"
 _IN_USE = ".in-use"
 
 
-def open_work_dir(parent: Path | None = None) -> tuple[Path, object]:
-    """A new folder for a window's scenes, with a lock file that stays open while the window lives.
+def _in_use(folder: Path) -> bool:
+    """Whether a running window still owns this work folder.
 
-    Folders of earlier runs that ended without cleaning up (a crash, a killed
-    process) are deleted first. A folder whose lock file cannot be deleted
-    belongs to a window still open (Windows keeps open files) and is left alone.
+    The owner keeps its lock file open and writes its process id into it. On
+    Windows an open file cannot be deleted, which answers the question even
+    after a crash freed the process id for reuse; elsewhere the id is checked.
+    """
+    lock = folder / _IN_USE
+    if os.name == "nt":
+        try:
+            lock.unlink(missing_ok=True)
+            return False
+        except OSError:
+            return True
+    try:
+        pid = int(lock.read_text(encoding="ascii").strip() or 0)
+    except (OSError, ValueError):
+        return False
+    if not pid or pid == os.getpid():
+        return False
+    try:
+        os.kill(pid, 0)                            # signal 0: only asks whether the process exists
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def open_work_dir(parent: Path | None = None):
+    """A new folder for a window's scenes, and its lock file, kept open while the window lives.
+
+    Folders left by earlier runs that ended without cleaning up (a crash, a
+    killed process) are deleted first; folders of windows still open are kept.
+    Returns (folder, open lock file): close the file before deleting the folder.
     """
     parent = Path(parent or tempfile.gettempdir())
     for old in parent.glob(WORK_PREFIX + "*"):
-        lock = old / _IN_USE
-        try:
-            lock.unlink(missing_ok=True)
-        except OSError:
-            continue                               # in use by another window
-        shutil.rmtree(old, ignore_errors=True)
+        if not _in_use(old):
+            shutil.rmtree(old, ignore_errors=True)
     folder = Path(tempfile.mkdtemp(prefix=WORK_PREFIX, dir=parent))
-    return folder, open(folder / _IN_USE, "w")
+    lock = open(folder / _IN_USE, "w", encoding="ascii")
+    lock.write(str(os.getpid()))
+    lock.flush()
+    return folder, lock
 
 
 def detect_black_bars(ffmpeg: str, info: VideoInfo, cancel: CancelToken | None = None) -> Crop | None:
@@ -276,19 +309,19 @@ def _poc_lsb_bits(sps: bytes) -> int:
     return r.get(4) + 4
 
 
-def _poc_lsb(rbsp: bytes, in_slice_header: bool, lsb_bits: int) -> int:
-    """ph_pic_order_cnt_lsb from a picture header (H.266 7.3.2.8)."""
+def _picture_header(rbsp: bytes, in_slice_header: bool, lsb_bits: int) -> tuple[int, bool]:
+    """(ph_pic_order_cnt_lsb, ph_non_ref_pic_flag) from a picture header (H.266 7.3.2.8)."""
     r = _Bits(rbsp)
     if in_slice_header and not r.get(1):           # sh_picture_header_in_slice_header_flag
         raise LookupError("picture header in its own NAL unit")
     irap_or_gdr = r.get(1)
-    r.get(1)                                       # ph_non_ref_pic_flag
+    non_reference = bool(r.get(1))                 # ph_non_ref_pic_flag
     if irap_or_gdr:
         r.get(1)                                   # ph_gdr_pic_flag
     if r.get(1):                                   # ph_inter_slice_allowed_flag
         r.get(1)
     r.ue()                                         # ph_pic_parameter_set_id
-    return r.get(lsb_bits)
+    return r.get(lsb_bits), non_reference
 
 
 def _parse_fgc(payload: bytes) -> tuple[GrainSet | None, bool]:
@@ -320,14 +353,16 @@ def read_grain(bitstream: bytes) -> list[GrainSet | None]:
     """The film grain parameters in force for every picture, in display order.
 
     FGC SEI messages sit in prefix SEI NAL units in front of their picture. The
-    display order comes from each picture's picture order count; a picture
-    without a message keeps the previous parameters when their persistence
-    flag says so (H.274), and a cancel message ends them.
+    display order comes from each picture's picture order count, derived as
+    vvdec does (H.266 8.3.1). A picture without a message keeps the previous
+    parameters when their persistence flag says so, until a cancel message or
+    the next coded video sequence (H.274).
     """
     lsb_bits = None
     pictures: list[tuple[int, int, list]] = []     # (coded video sequence, POC, its FGC messages)
+    header: tuple[int, bool] | None = None         # from a picture header NAL unit, for its slices
     pending: list = []
-    cvs, prev_lsb, prev_msb, ph_poc = -1, 0, 0, None
+    cvs, prev_lsb, prev_msb = -1, 0, 0
     for nal in _annexb_nals(bitstream):
         if len(nal) < 2:
             continue
@@ -343,14 +378,14 @@ def read_grain(bitstream: bytes) -> list[GrainSet | None]:
                 raise ValueError("a picture comes before the SPS")
             rbsp = unescape_rbsp(nal[2:])
             if kind == _NAL_PH:
-                ph_poc = _poc_lsb(rbsp, False, lsb_bits)
+                header = _picture_header(rbsp, False, lsb_bits)
                 continue
             try:
-                lsb = _poc_lsb(rbsp, True, lsb_bits)
+                lsb, non_reference = _picture_header(rbsp, True, lsb_bits)
             except LookupError:                    # its picture header came in a PH NAL unit
-                if ph_poc is None:
+                if header is None:
                     continue                       # a further slice of the same picture
-                lsb, ph_poc = ph_poc, None
+                (lsb, non_reference), header = header, None
             max_lsb = 1 << lsb_bits
             if kind in _IDR_TYPES or (kind in _IRAP_TYPES and cvs < 0):
                 cvs, msb = cvs + 1, 0
@@ -360,13 +395,16 @@ def read_grain(bitstream: bytes) -> list[GrainSet | None]:
                 msb = prev_msb - max_lsb
             else:
                 msb = prev_msb
-            if tid == 0 and kind not in _LEADING_TYPES:
-                prev_lsb, prev_msb = lsb, msb
+            if tid == 0 and kind not in _LEADING_TYPES and not non_reference:
+                prev_lsb, prev_msb = lsb, msb      # prevTid0Pic, as vvdec's xUpdatePreviousTid0POC
             pictures.append((cvs, msb + lsb, pending))
             pending = []
     result: list[GrainSet | None] = []
     current: GrainSet | None = None
-    for _, _, messages in sorted(pictures, key=lambda p: (p[0], p[1])):
+    previous_cvs = None
+    for picture_cvs, _, messages in sorted(pictures, key=lambda p: (p[0], p[1])):
+        if picture_cvs != previous_cvs:
+            current, previous_cvs = None, picture_cvs      # persistence ends with its sequence
         if messages:
             current, persists = messages[-1]
             result.append(current)
@@ -393,7 +431,17 @@ def cut_scene(ffmpeg: str, info: VideoInfo, start: int, frames: int, crop: Crop 
         raise RuntimeError(f"{info.path.name}: frame {start} could not be decoded")
     times = [float(t) for t in _PTS_TIME.findall(log)]
     first = frame_index(info, times[0]) if times else start   # a cut file may start later
-    return SceneCut(first, count, geometry, crop, info.fps, folder)
+    return SceneCut(first, count, geometry, crop, info.fps, folder, vvenc_hdr_mode(info))
+
+
+def vvenc_hdr_mode(info: VideoInfo) -> str:
+    """vvencapp --hdr for the source: an HDR encode adapts its QPs to PQ / HLG, so the preview must too."""
+    wide = info.primaries.startswith("bt2020")
+    if info.transfer == "smpte2084":
+        return "pq_2020" if wide else "pq"
+    if info.transfer == "arib-std-b67":
+        return "hlg_2020" if wide else "hlg"
+    return "off"
 
 
 def encode_scene(tools: VvcTools, cut: SceneCut, settings: VvcSettings, cancel: CancelToken,
@@ -415,6 +463,7 @@ def encode_scene(tools: VvcTools, cut: SceneCut, settings: VvcSettings, cancel: 
              "--fps", f"{fps.numerator}/{fps.denominator}", "-f", str(cut.count),
              "--qp", f"{settings.qp:g}", "--preset", settings.preset,
              "--fga", str(settings.fga), "--fgastrength", str(settings.strength),
+             *(["--hdr", cut.hdr] if cut.hdr != "off" else []),
              "-o", str(folder / "clip.266")], cancel)
         encode_seconds = time.perf_counter() - started
 
@@ -439,14 +488,6 @@ def encode_scene(tools: VvcTools, cut: SceneCut, settings: VvcSettings, cancel: 
                 grain, encode_seconds)
 
 
-def make_clip(ffmpeg: str, tools: VvcTools, info: VideoInfo, start: int,
-              settings: VvcSettings, crop: Crop | None, folder: Path, cancel: CancelToken,
-              progress) -> Clip:
-    """Cut ``settings.frames`` source frames from ``start`` and encode them in one mode."""
-    cut = cut_scene(ffmpeg, info, start, settings.frames, crop, folder, cancel, progress)
-    return encode_scene(tools, cut, settings, cancel, progress)
-
-
 @dataclass
 class FrameStats:
     """How much grain VVenC took out of a frame and how much vvdec puts back (8-bit units)."""
@@ -466,7 +507,3 @@ def frame_stats(source: Frame, decoded: Frame, grained: Frame) -> FrameStats:
     return FrameStats(tuple(float(np.std(d)) for d in removed), tuple(float(np.std(d)) for d in added),
                       tuple(float(np.mean(d)) for d in added))
 
-
-def most_common_grain(clip: Clip) -> Counter:
-    """How many frames of the clip carry each distinct parameter set (by its description)."""
-    return Counter(g.describe() if g else "none" for g in clip.grain)

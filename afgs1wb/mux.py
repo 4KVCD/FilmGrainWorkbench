@@ -157,13 +157,12 @@ def write_afgs1_mkv(tools: Tools, encoded: VideoInfo, output: str | Path,
         raise ValueError("the output must not overwrite the encoded input")
     plan = params if isinstance(params, GrainPlan) else StaticPlan(params)
     fmt = picture_format(encoded)
-    templates: dict[int, T35Template] = {}
+    templates: dict[object, T35Template] = {}
 
     def template_for(index: int) -> T35Template:
-        chosen = plan.params_at(index)
-        key = id(chosen)
+        key = plan.key_at(index)
         if key not in templates:
-            templates[key] = T35Template(chosen, fmt)
+            templates[key] = T35Template(plan.params_at(index), fmt)
         return templates[key]
     fps = float(encoded.fps)
     output.parent.mkdir(parents=True, exist_ok=True)

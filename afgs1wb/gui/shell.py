@@ -33,7 +33,8 @@ class Workbench(QMainWindow):
             self.tabs.setTabToolTip(self.tabs.count() - 1, tip)
         self.setCentralWidget(self.tabs)
         settings_menu = self.menuBar().addMenu("&Settings")
-        settings_menu.addAction("External programs…", self._edit_tools)
+        settings_menu.addAction("External programs…", self.av1._edit_tools)
+        self.av1.tools_changed.connect(self._tools_changed)     # from the menu or the AV1 tab's banner
         if self.settings.value("shell/geometry"):
             self.restoreGeometry(self.settings.value("shell/geometry"))
         else:
@@ -47,7 +48,10 @@ class Workbench(QMainWindow):
         return self.av1.data_dir
 
     def _log(self, text: str) -> None:
-        self.av1._log(text)
+        """For the error handler: the message goes to the tab in view (and the AV1 tab's activity log)."""
+        self.tabs.currentWidget().status_label.setText(text)
+        if self.tabs.currentWidget() is self.av1:
+            self.av1._log(text)
 
     def show_tab(self, index: int) -> None:
         self.tabs.setCurrentIndex(index)
@@ -59,15 +63,17 @@ class Workbench(QMainWindow):
                 shortcut.setEnabled(i == index)
         self.settings.setValue("shell/tab", index)
 
-    def _edit_tools(self) -> None:
-        self.av1._edit_tools()
+    def _tools_changed(self) -> None:
         self.vvc.tools = self.vvc._load_tools()            # the VVC tab uses the same ffmpeg / ffprobe
         self.vvc._update_tools()
 
     def closeEvent(self, event) -> None:
+        # Every tab is asked before any is shut down: the AV1 tab asks while it is writing,
+        # and a "No" there must leave the VVC tab's work and files as they are.
+        if not all(page.can_close() for page in self.pages):
+            event.ignore()
+            return
         for page in self.pages:
-            if not page.close():                            # the AV1 tab asks while it is writing
-                event.ignore()
-                return
+            page.shutdown()
         self.settings.setValue("shell/geometry", self.saveGeometry())
         event.accept()

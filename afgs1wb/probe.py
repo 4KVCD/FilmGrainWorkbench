@@ -46,10 +46,6 @@ class VideoInfo:
         return max(1, int(round(self.duration * float(self.fps))))
 
     @property
-    def frame_duration(self) -> float:
-        return 1.0 / float(self.fps)
-
-    @property
     def limited_range(self) -> bool:
         return self.color_range != "pc"
 
@@ -60,9 +56,6 @@ class VideoInfo:
     def time_of(self, index: int) -> float:
         """Content time (seconds from the first shown frame) of frame ``index``."""
         return index / float(self.fps)
-
-    def index_at(self, seconds: float) -> int:
-        return max(0, min(self.frame_count - 1, int(round(seconds * float(self.fps)))))
 
     def describe(self) -> str:
         minutes, seconds = divmod(self.duration, 60)

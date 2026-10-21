@@ -4,7 +4,7 @@ PyAV cannot stream-copy VVC (it looks for a VVC encoder), and a raw Annex B
 elementary stream loses the presentation timestamps of B-pictures. This
 writer stores the packets exactly as given (length-prefixed NAL units), the
 original vvcC codec private data, and each packet's own presentation time in
-milliseconds, so FFmpeg can then merge it with the other streams losslessly.
+milliseconds, so mkvmerge can then merge it with the other streams losslessly.
 """
 
 from __future__ import annotations

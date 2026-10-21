@@ -88,9 +88,13 @@ def scale_params(p: GrainParams, tuning: Tuning, subsampled_420: bool = True) ->
 
 
 class GrainPlan:
-    """What grain each picture gets. Same object for frames sharing parameters."""
+    """What grain each picture gets."""
 
-    def params_at(self, index: int) -> GrainParams:
+    def params_at(self, index: int) -> GrainParams | None:
+        raise NotImplementedError
+
+    def key_at(self, index: int) -> object:
+        """Equal for pictures that get the same parameters (to reuse work done for them)."""
         raise NotImplementedError
 
     @property
@@ -105,6 +109,9 @@ class StaticPlan(GrainPlan):
 
     def params_at(self, index: int) -> GrainParams:
         return self.params
+
+    def key_at(self, index: int) -> object:
+        return 0
 
     @property
     def clipped(self) -> bool:
@@ -129,6 +136,9 @@ class TimelinePlan(GrainPlan):
             self._cache[key] = params
             self._any_clipped |= clipped
         return self._cache[key]
+
+    def key_at(self, index: int) -> object:
+        return self.model.segment_at(index).start
 
     @property
     def clipped(self) -> bool:
@@ -155,6 +165,9 @@ class FramePlan(GrainPlan):
         if cached is None or cached[0] is not raw:
             cached = self._cache[index] = (raw, *scale_params(raw, self.tuning, self._420))
         return cached[1]
+
+    def key_at(self, index: int) -> object:
+        return index
 
     def clipped_at(self, index: int) -> bool:
         return self.params_at(index) is not None and self._cache[index][2]

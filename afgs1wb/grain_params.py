@@ -15,7 +15,6 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
-from pathlib import Path
 import gc
 
 MAX_Y_POINTS = 14
@@ -215,10 +214,6 @@ def _parse_grain_table(text: str) -> list[TableEntry]:
     if not entries:
         raise ValueError("grain table has no entries")
     return entries
-
-
-def read_grain_table(path: str | Path) -> list[TableEntry]:
-    return parse_grain_table(Path(path).read_text(encoding="ascii"))
 
 
 def format_grain_table(entries: list[TableEntry]) -> str:

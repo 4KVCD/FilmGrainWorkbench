@@ -11,7 +11,7 @@ import os
 import time
 
 import numpy as np
-from PySide6.QtCore import QSettings, QStandardPaths, Qt, QTimer, QUrl
+from PySide6.QtCore import QSettings, QStandardPaths, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QDesktopServices, QImage, QKeySequence, QShortcut
 from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QFileDialog, QFormLayout,
                                QFrame, QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit,
@@ -25,15 +25,14 @@ from ..alignment import block_means, detect_offset, frame_match
 from ..fullscan import (TimelineModel, analyze_every_frame, analyzer_path, cache_key,
                         checkpoint_frame, default_threads, estimate_frame, estimate_seconds)
 from ..frames import Crop, Frame, Geometry, read_frame, read_frames, source_crop_for
-from ..grain_params import TableEntry, format_grain_table
+from ..grain_params import GrainParams, TableEntry, format_grain_table
 from ..mux import WriteReport, write_afgs1_mkv
 from ..probe import VideoInfo, probe
 from ..tools import Tools, ToolError, detect_tools, keep_awake
-from ..grain_params import GrainParams
 from ..tuning import (FramePlan, GrainPlan, TimelinePlan, Tuning, entry_sigmas, scale_params,
                       sigma_in_8bit_units)
 from .curves import CurvePlot
-from .jobs import Job
+from .jobs import Job, running
 from .timeline import GrainTimeline
 from .tools_dialog import ToolsDialog
 from .viewer import ENCODED, GRAIN, GRAIN_ONLY, SOURCE, VIEW_NAMES, FrameView, PreviewState, ViewerWindow
@@ -65,6 +64,8 @@ class Written:
 
 
 class MainWindow(QMainWindow):
+    tools_changed = Signal()                     # the external programs were set up anew
+
     def __init__(self, settings: QSettings | None = None, data_dir: Path | None = None) -> None:
         super().__init__()
         self.setWindowTitle("AFGS1 Grain Workbench")
@@ -414,10 +415,6 @@ class MainWindow(QMainWindow):
 
     def _restore(self) -> None:
         s = self.settings
-        if s.value("window/geometry"):
-            self.restoreGeometry(s.value("window/geometry"))
-        else:
-            self.resize(1600, 980)
         if s.value("window/splitter"):
             self.splitter.restoreState(s.value("window/splitter"))
         self.luma_spin.setValue(int(s.value("tune/luma", 100)))
@@ -431,7 +428,6 @@ class MainWindow(QMainWindow):
 
     def _save(self) -> None:
         s = self.settings
-        s.setValue("window/geometry", self.saveGeometry())
         s.setValue("window/splitter", self.splitter.saveState())
         for name in Tools.LABELS:
             s.setValue(f"tools/{name}", getattr(self.tools, name))
@@ -461,6 +457,7 @@ class MainWindow(QMainWindow):
             self._save()
             self._update_tools_banner()
             self._update_enabled()
+            self.tools_changed.emit()
 
     def _update_tools_banner(self) -> None:
         missing = self.tools.missing()
@@ -575,7 +572,7 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------------ enabling
     def _busy(self) -> bool:
-        return bool(self.job and self.job.isRunning())
+        return running(self.job)
 
     def _update_enabled(self) -> None:
         busy = self._busy()
@@ -799,7 +796,6 @@ class MainWindow(QMainWindow):
         job = Job("Loading the saved analysis", work, self)
         job.succeeded.connect(lambda model: self._model_loaded(model, pair))
         job.failed.connect(lambda msg: self._model_loaded(None, pair, msg))
-        job.finished.connect(job.deleteLater)
         self.model_job = job
         job.start()
 
@@ -942,7 +938,7 @@ class MainWindow(QMainWindow):
     def _request_frame(self, index: int) -> None:
         if not self.encoded or self.tools.missing("ffmpeg"):
             return
-        if self.frame_job and self.frame_job.isRunning():
+        if running(self.frame_job):
             self.pending_index = index
             return
         self.pending_index = None
@@ -1104,7 +1100,7 @@ class MainWindow(QMainWindow):
         """Re-synthesise the grain views for the current frame after a tuning change."""
         if not (self.plan and self.encoded):
             return
-        if self.frame_job and self.frame_job.isRunning():
+        if running(self.frame_job):
             self.grain_dirty = True
             return
         self.grain_dirty = False
@@ -1305,27 +1301,32 @@ class MainWindow(QMainWindow):
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.written.report.output.parent)))
 
     # ------------------------------------------------------------------ close
-    def closeEvent(self, event) -> None:
-        if self._busy():
-            extra = (" The grain analysis so far is kept; the next Write continues from there."
-                     if self.job.name == "Writing" else "")
-            answer = QMessageBox.question(self, "Work in progress",
-                                          f"{self.job.name} is still running. Cancel it and quit?{extra}")
-            if answer != QMessageBox.StandardButton.Yes:
-                event.ignore()
-                return
-            self.job.cancel()
-            self.job.wait(10000)
-        if self.frame_job and self.frame_job.isRunning():
-            self.frame_job.cancel()
-            self.frame_job.wait(5000)
-        try:
-            if self.model_job and self.model_job.isRunning():
-                self.model_job.wait(15000)       # reading a saved analysis cannot be interrupted
-        except RuntimeError:                     # already finished and deleted
-            pass
+    def can_close(self) -> bool:
+        """Ask before closing would cancel a running job (a Write can take hours)."""
+        if not self._busy():
+            return True
+        extra = (" The grain analysis so far is kept; the next Write continues from there."
+                 if self.job.name == "Writing" else "")
+        answer = QMessageBox.question(self, "Work in progress",
+                                      f"{self.job.name} is still running. Cancel it and quit?{extra}")
+        return answer == QMessageBox.StandardButton.Yes
+
+    def shutdown(self) -> None:
+        """Stop every job and save the settings; nothing is asked any more."""
+        for job, seconds in ((self.job, 10), (self.frame_job, 5)):
+            if running(job):
+                job.cancel()
+                job.wait(seconds * 1000)
+        if running(self.model_job):
+            self.model_job.wait(15000)           # reading a saved analysis cannot be interrupted
         if self.viewer_window:
             self.settings.setValue("viewer/geometry", self.viewer_window.saveGeometry())
             self.viewer_window.close()
         self._save()
+
+    def closeEvent(self, event) -> None:
+        if not self.can_close():
+            event.ignore()
+            return
+        self.shutdown()
         event.accept()

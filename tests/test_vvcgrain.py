@@ -9,7 +9,7 @@ import pytest
 
 from afgs1wb.probe import probe
 from afgs1wb.tools import CancelToken
-from afgs1wb.vvcgrain import DECODED, GRAIN, VvcSettings, find_vvc_tools, make_clip, read_grain
+from afgs1wb.vvcgrain import DECODED, GRAIN, VvcSettings, cut_scene, encode_scene, find_vvc_tools, read_grain
 
 from conftest import CACHE
 
@@ -43,8 +43,9 @@ def film_crop(tools):
 @pytest.mark.parametrize("fga", [2, 3])
 def test_clip_carries_and_shows_the_analysed_grain(tools, vvc_tools, film_crop, tmp_path, fga):
     info = probe(film_crop, tools.ffprobe)
-    clip = make_clip(tools.ffmpeg, vvc_tools, info, 8, VvcSettings(fga=fga, qp=28, frames=17), None,
-                     tmp_path / "clip", CancelToken(), lambda *_: None)
+    settings = VvcSettings(fga=fga, qp=28, frames=17)
+    cut = cut_scene(tools.ffmpeg, info, 8, settings.frames, None, tmp_path / "scene", CancelToken(), lambda *_: None)
+    clip = encode_scene(vvc_tools, cut, settings, CancelToken(), lambda *_: None)
     assert (clip.start, clip.count) == (8, 17) and len(clip.grain) == 17
     model = 0 if fga == 2 else 1
     assert all(g is not None and g.model_id == model and g.components[0] for g in clip.grain)
