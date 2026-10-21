@@ -7,6 +7,7 @@
 #pragma once
 
 #include <array>
+#include <span>
 #include <utility>
 #include <vector>
 
@@ -40,8 +41,9 @@ void add_grain(Frame& frame, const GrainParams& params, int seed, bool matrix_id
 
 // Standard deviation of the luma grain template in sample units: the
 // synthesised luma noise at intensity I has a standard deviation of about
-// scaling(I) / 2^scaling_shift × this. Averaged over three seeds.
-double luma_template_std(const GrainParams& params, int bit_depth);
+// scaling(I) / 2^scaling_shift × this. Averaged over `seeds` (by default
+// three: 1, 7391 and 40000).
+double luma_template_std(const GrainParams& params, int bit_depth, std::span<const int> seeds = {});
 
 // The same for Cb and Cr.
 std::pair<double, double> chroma_template_std(const GrainParams& params, int bit_depth, int subsampling_x,

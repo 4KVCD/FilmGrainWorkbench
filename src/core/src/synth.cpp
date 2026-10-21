@@ -401,13 +401,16 @@ double region_std(const std::vector<int>& values, int width, int top, int left, 
 
 }  // namespace
 
-double luma_template_std(const GrainParams& params, int bit_depth) {
+double luma_template_std(const GrainParams& params, int bit_depth, std::span<const int> seeds) {
+    if (seeds.empty()) {
+        seeds = template_std_seeds;
+    }
     double total = 0;
-    for (const int seed : template_std_seeds) {
+    for (const int seed : seeds) {
         const GrainTemplates t = generate_grain(params, seed, bit_depth, 1, 1);
         total += region_std(t.luma, GrainTemplates::luma_width, 9, 9, 64, 64);
     }
-    return total / std::size(template_std_seeds);
+    return total / static_cast<double>(seeds.size());
 }
 
 std::pair<double, double> chroma_template_std(const GrainParams& params, int bit_depth, int subx, int suby) {

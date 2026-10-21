@@ -3,7 +3,7 @@ __pycache__/
 *.pyc
 tests/.cache/
 .pytest_cache/
-bin/
+/bin/
 third_party/libaom/
 third_party/aom-build/
 build/

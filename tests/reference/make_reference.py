@@ -12,6 +12,7 @@ bytes).
 from __future__ import annotations
 
 from pathlib import Path
+from fractions import Fraction
 import hashlib
 import json
 import sys
@@ -146,10 +147,13 @@ def afgs1_cases() -> dict:
     return out
 
 
+def as_libaom_writes(p: GrainParams) -> GrainParams:
+    """Every luma coefficient written, zeros without luma grain, as libaom's tables have them."""
+    n = grain_params.num_luma_ar_coeffs(p.ar_coeff_lag)
+    return p if len(p.ar_coeffs_y) == n else p.copy(ar_coeffs_y=[0] * n)
+
+
 def table_cases() -> dict:
-    def as_libaom_writes(p: GrainParams) -> GrainParams:   # every luma coefficient, zeros without luma grain
-        n = grain_params.num_luma_ar_coeffs(p.ar_coeff_lag)
-        return p if len(p.ar_coeffs_y) == n else p.copy(ar_coeffs_y=[0] * n)
     entries = [grain_params.TableEntry(k * 1000, (k + 1) * 1000, as_libaom_writes(p))
                for k, p in enumerate(param_cases())]
     text = grain_params.format_grain_table(entries)
@@ -239,12 +243,142 @@ def mkv_cases() -> dict:
     return {"sha256": digest_hex, "size": size}
 
 
+PROBE_VIDEOS = {
+    # name: ffmpeg arguments after the inputs (lavfi testsrc2 + sine)
+    "h264_ntsc.mkv": ["-r", "24000/1001", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac"],
+    "hevc_pq.mp4": ["-r", "25", "-c:v", "libx265", "-pix_fmt", "yuv420p10le", "-color_primaries", "bt2020",
+                    "-color_trc", "smpte2084", "-colorspace", "bt2020nc", "-x265-params", "log-level=none",
+                    "-c:a", "aac"],
+    "ffv1_444_full.mkv": ["-r", "30", "-c:v", "ffv1", "-pix_fmt", "yuv444p10le", "-color_range", "pc", "-an"],
+    "vvc_hlg.mkv": ["-r", "50", "-c:v", "libvvenc", "-preset", "faster", "-qp", "40", "-pix_fmt", "yuv420p10le",
+                    "-color_trc", "arib-std-b67", "-color_primaries", "bt709", "-colorspace", "bt709", "-an"],
+}
+
+
+def probe_cases() -> dict:
+    """ffprobe's answers for small synthetic videos (re-muxed by mkvmerge for its statistics tags),
+    and the Python app's VideoInfo, filter chains and commands from them."""
+    import subprocess
+    from afgs1wb import frames, probe as probe_module
+    from afgs1wb.tools import detect_tools
+    tools = detect_tools()
+    cache = ROOT / "tests" / ".cache" / "probe"
+    cache.mkdir(parents=True, exist_ok=True)
+    out = []
+    for name, args in PROBE_VIDEOS.items():
+        made = cache / name
+        if not made.exists():
+            subprocess.run([tools.ffmpeg, "-v", "error", "-y", "-f", "lavfi", "-i",
+                            "testsrc2=size=320x184:rate=24:duration=2", "-f", "lavfi", "-i",
+                            "sine=frequency=440:duration=2", *args, str(made)], check=True)
+        videos = [made]
+        if made.suffix == ".mkv":
+            remuxed = cache / ("mkvmerge_" + name)
+            if not remuxed.exists():
+                subprocess.run([tools.mkvmerge, "--quiet", "-o", str(remuxed), str(made)], check=True)
+            videos.append(remuxed)
+        for video in videos:
+            video = video.relative_to(ROOT)          # paths in the reference without this PC's folders
+            answers = {}
+            real_run_text = probe_module.run_text
+
+            def recording(command, cancel=None):
+                text = real_run_text(command, cancel)
+                answers["packets" if "packet=pts_time" in command else "streams"] = text
+                return text
+            probe_module.run_text = recording
+            try:
+                info = probe_module.probe(video, tools.ffprobe)
+            finally:
+                probe_module.run_text = real_run_text
+            target = frames.Geometry(160, 92, 10, 1, 1)
+            crop = frames.Crop(300, 160, 10, 12)
+            out.append({
+                "name": video.name, "path": str(info.path), "streams": answers["streams"],
+                "packets": answers["packets"],
+                "info": {"stream_index": info.stream_index, "codec": info.codec, "width": info.width,
+                         "height": info.height, "fps": [info.fps.numerator, info.fps.denominator],
+                         "pix_fmt": info.pix_fmt, "bit_depth": info.bit_depth,
+                         "subsampling": [info.subsampling_x, info.subsampling_y], "duration": info.duration,
+                         "first_pts": info.first_pts, "color_range": info.color_range, "matrix": info.matrix,
+                         "transfer": info.transfer, "primaries": info.primaries, "start_time": info.start_time,
+                         "frames": info.frames, "frame_count": info.frame_count},
+                "describe": info.describe(),
+                "filter_plain": frames.filter_chain(info, frames.Geometry.of(info), None),
+                "filter_scaled": frames.filter_chain(info, target, crop),
+                "seek_17": frames.seek_args(info, 17),
+                "command": frames.ffmpeg_command("ffmpeg", info, 9, 4, target, crop, "pipe:1", with_times=True),
+                "command_plain": frames.ffmpeg_command("ffmpeg", info, 0, 1, frames.Geometry.of(info), None, "x.yuv"),
+                "frame_index_1_5": frames.frame_index(info, 1.5)})
+    crops = []
+    for sw, sh, ew, eh in ((3840, 2160, 3840, 1608), (1920, 1080, 1920, 800), (1440, 1080, 1920, 1080),
+                           (3840, 2160, 3840, 2160), (720, 576, 1024, 576), (1920, 1080, 1440, 1080)):
+        def fake(w, h):
+            return probe_module.VideoInfo(Path("x"), 0, "h264", w, h, Fraction(24), "yuv420p", 8, 1, 1, 10.0, 0.0,
+                                          "tv", "", "", "")
+        c = frames.source_crop_for(fake(sw, sh), fake(ew, eh))
+        crops.append({"source": [sw, sh], "encoded": [ew, eh],
+                      "crop": None if c is None else [c.width, c.height, c.x, c.y]})
+    return {"videos": out, "crops": crops}
+
+
+def fraction_cases() -> list:
+    cases = []
+    for num, den in ((24000, 1001), (2997, 100), (30000, 1001), (119880, 1000), (3000003, 1000001),
+                     (123456789, 987654), (60, 1), (1, 3), (2**40 + 1, 2**33)):
+        f = Fraction(num, den)
+        for limit in (1001000, 1000, 7):
+            g = f.limit_denominator(limit)
+            cases.append({"num": num, "den": den, "limit": limit, "result": [g.numerator, g.denominator]})
+    return cases
+
+
+def timeline_cases() -> dict:
+    from afgs1wb.fullscan import Segment, TimelineModel, sample_sigmas
+    from afgs1wb.tools import CancelToken
+    params = [as_libaom_writes(p) for p in param_cases()]
+    segments = [Segment(k * 37, (k + 1) * 37, p) for k, p in enumerate(params)]
+    model = TimelineModel(segments, 10, 1, 1, Fraction(24000, 1001), len(params) * 37 + 5, seconds=123.456,
+                          alignment=["ok", "unclear", "ok"], notes={"warnings": ["a warning"], "resumed": True})
+    sample_sigmas(model, CancelToken())
+    table = model.grain_table()
+    return {"json": model.to_json(), "sigma_frames": model.sigma_frames, "sigma_values": model.sigma_values,
+            "grain_table": [{"start": e.start, "end": e.end} for e in table],
+            "segment_at": [{"index": i, "start": model.segment_at(i).start} for i in (-5, 0, 36, 37, 100, 10**6)]}
+
+
+def read_grain_cases() -> list:
+    sys.path.insert(0, str(ROOT / "tests"))
+    import test_vvcgrain as t
+    from afgs1wb.vvcgrain import read_grain
+    streams = {
+        "persistence": (t._sps(8) + t._fgc(1, persist=True) + t._slice(7, 0) + t._fgc(2) + t._slice(0, 4)
+                        + t._slice(0, 2) + t._slice(0, 1) + t._slice(0, 3) + t._slice(0, 5)
+                        + t._fgc(3, persist=True) + t._slice(0, 6) + t._CANCEL + t._slice(0, 7) + t._slice(0, 8)
+                        + t._fgc(4, persist=True) + t._slice(0, 9) + t._slice(7, 0)),
+        "order": (t._sps(4) + t._fgc(0) + t._slice(7, 0, 4) + t._fgc(1) + t._slice(0, 8, 4)
+                  + t._fgc(2) + t._slice(0, 15, 4, non_reference=True) + t._fgc(3) + t._slice(0, 6, 4)
+                  + t._fgc(4) + t._picture_header_nal(14, 4) + t._slice_after_picture_header(0)
+                  + t._slice_after_picture_header(0) + t._fgc(5) + t._slice(0, 2, 4)
+                  + t._fgc(6) + t._slice(3, 9, 4) + t._fgc(7) + t._slice(0, 13, 4)),
+        "values": t._sps(8) + t._fgc(0, values=(40, 7, 5)) + t._slice(7, 0) + t._fgc(1, values=(-3, 9)) + t._slice(0, 1),
+    }
+    cases = []
+    for name, data in streams.items():
+        grain = read_grain(data)
+        cases.append({"name": name, "stream": data.hex(),
+                      "describe": [g.describe() if g else None for g in grain]})
+    return cases
+
+
 def write(name: str, data: dict) -> None:
     (OUT / name).write_text(json.dumps(data, indent=1) + "\n", encoding="utf-8")
     print(f"wrote {name}")
 
 
 if __name__ == "__main__":
+    import os
+    os.chdir(ROOT)
     write("params.json", {"cases": [params_json(p) for p in param_cases()]})
     write("synth.json", synth_cases())
     write("afgs1.json", afgs1_cases())
@@ -253,3 +387,5 @@ if __name__ == "__main__":
     write("display.json", display_cases())
     write("vvc.json", vvc_cases())
     write("mkv.json", mkv_cases())
+    write("engine.json", {"probe": probe_cases(), "fractions": fraction_cases(), "timeline": timeline_cases(),
+                          "read_grain": read_grain_cases()})
