@@ -83,12 +83,12 @@ def main() -> int:
     app.setStyle("Fusion")
     app.setPalette(_dark_palette())
     app.setStyleSheet(STYLE)
-    if "--vvc" in sys.argv[1:]:                    # VVC's own grain: VVenC analysis + vvdec synthesis
-        from .vvc_window import VvcGrainWindow
-        window = VvcGrainWindow()
-    else:
-        from .main_window import MainWindow
-        window = MainWindow()
+    from .shell import AV1_TAB, VVC_TAB, Workbench
+    window = Workbench()
+    if "--vvc" in sys.argv[1:]:                    # open on a given tab, else the one used last
+        window.show_tab(VVC_TAB)
+    elif "--av1" in sys.argv[1:]:
+        window.show_tab(AV1_TAB)
     install_error_handler(window)
     window.show()
     return app.exec()

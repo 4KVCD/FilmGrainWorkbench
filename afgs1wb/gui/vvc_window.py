@@ -342,6 +342,8 @@ class VvcGrainWindow(QMainWindow):
         self.crop_check.setChecked(s.value("vvc/crop", "true") in (True, "true"))
 
     def _save(self) -> None:
+        if not self.started:
+            return      # restoring the controls fires their change signals: they would save an empty source
         s = self.settings
         s.setValue("vvc/geometry", self.saveGeometry())
         s.setValue("vvc/source", self.source_edit.text())
@@ -356,7 +358,10 @@ class VvcGrainWindow(QMainWindow):
         return VvcSettings(int(self.fga_combo.currentData()), self.strength_spin.value(),
                            float(self.qp_spin.value()), self.preset_combo.currentText(), self.frames_spin.value())
 
+    started = False
+
     def _startup(self) -> None:
+        self.started = True
         saved = self.settings.value("vvc/source", "")
         if saved:
             self.source_edit.setText(saved)

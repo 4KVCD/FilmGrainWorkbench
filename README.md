@@ -56,8 +56,10 @@ Tests: `.venv\Scripts\python -m pip install -r requirements-dev.txt` then
 
 ## VVC grain analyzer
 
-VVC's own film grain, instead of AV1's: `"Run VVC Grain Analyzer.bat"`, or
-*Window → VVC grain analyzer* in the workbench. Choose a source video and
+The app opens on two tabs: **VVC grain analyzer (VVenC)**, described here, and
+**AV1 grain into VVC (AFGS1)**, the workbench above. `"Run AFGS1 Workbench.bat"`
+opens the tab used last, `"Run VVC Grain Analyzer.bat"` the VVC one. In the VVC
+tab, choose a source video and
 browse it for a scene: only the source is decoded while you look. *Encode
 this scene* (E) encodes the frames around the one shown with VVenC in all
 three film grain analysis modes (`--fga 1`, `2`, `3`), each writing an H.274

@@ -364,9 +364,6 @@ class MainWindow(QMainWindow):
         status.addPermanentWidget(self.progress)
         status.addPermanentWidget(self.cancel_button)
 
-        windows = self.menuBar().addMenu("&Window")
-        windows.addAction("VVC grain analyzer (VVenC film grain analysis + vvdec synthesis)…",
-                          self._open_vvc_window)
         menu = self.menuBar().addMenu("&Settings")
         menu.addAction("External programs…", self._edit_tools)
 
@@ -388,16 +385,6 @@ class MainWindow(QMainWindow):
         row.addWidget(spin)
         form.addRow(title, row)
         return slider, spin
-
-    def _open_vvc_window(self) -> None:
-        from .vvc_window import VvcGrainWindow
-        if self.vvc_window is None or not self.vvc_window.isVisible():
-            self.vvc_window = VvcGrainWindow(self.settings)
-        self.vvc_window.show()
-        self.vvc_window.raise_()
-        self.vvc_window.activateWindow()
-
-    vvc_window = None
 
     def _install_shortcuts(self, window: QWidget, view: FrameView) -> None:
         def add(key, fn):
