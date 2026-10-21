@@ -1,5 +1,6 @@
 #include "fgw/frames.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <fstream>
@@ -132,9 +133,10 @@ std::string file_name(const VideoInfo& info) { return utf8(info.path.filename())
 
 }  // namespace
 
-std::vector<Frame> read_frames(const std::string& ffmpeg, const VideoInfo& info, std::int64_t index,
-                               std::int64_t count, CancelToken* cancel, const std::optional<Geometry>& target,
-                               const std::optional<Crop>& crop) {
+std::vector<std::int64_t> decode_frames(const std::string& ffmpeg, const VideoInfo& info, std::int64_t index,
+                                        std::int64_t count, const std::function<void(Frame&)>& each,
+                                        CancelToken* cancel, const std::optional<Geometry>& target,
+                                        const std::optional<Crop>& crop) {
     const Geometry geometry = target.value_or(geometry_of(info));
     if (cancel != nullptr) {
         cancel->check();
@@ -158,18 +160,22 @@ std::vector<Frame> read_frames(const std::string& ffmpeg, const VideoInfo& info,
         }
     }();
     const CancelToken::Tracking tracking(cancel, child);
-    std::vector<Frame> frames;
+    std::int64_t decoded = 0;
     std::vector<std::uint8_t> scratch;
     const std::atomic<bool> never = false;
-    for (std::int64_t k = 0; k < count; ++k) {
-        Frame frame = make_frame(geometry, index + k);
+    Frame frame;
+    for (; decoded < count; ++decoded) {
+        if (frame.y.samples.empty()) {  // the first, or `each` kept the last one
+            frame = make_frame(geometry);
+        }
+        frame.index = index + decoded;
         child.gather(geometry.frame_bytes(), never);
         if (!read_plane(child, frame.y, geometry.sample_bytes(), scratch) ||
             !read_plane(child, frame.u, geometry.sample_bytes(), scratch) ||
             !read_plane(child, frame.v, geometry.sample_bytes(), scratch)) {
             break;
         }
-        frames.push_back(std::move(frame));
+        each(frame);
     }
     const int exit_code = child.wait();
     const std::string log = child.standard_error();  // also waits for the last showinfo lines
@@ -179,12 +185,26 @@ std::vector<Frame> read_frames(const std::string& ffmpeg, const VideoInfo& info,
     if (exit_code != 0) {
         throw tool_failure(ffmpeg, exit_code, log);
     }
-    if (frames.empty()) {
+    if (decoded == 0) {
         throw std::runtime_error(file_name(info) + ": frame " + std::to_string(index) + " could not be decoded");
     }
+    std::vector<std::int64_t> indices;
     const std::lock_guard lock(times_mutex);
-    for (std::size_t k = 0; k < frames.size() && k < times.size(); ++k) {
-        frames[k].index = frame_index(info, times[k]);
+    for (std::int64_t k = 0; k < decoded; ++k) {
+        indices.push_back(k < static_cast<std::int64_t>(times.size()) ? frame_index(info, times[k]) : index + k);
+    }
+    return indices;
+}
+
+std::vector<Frame> read_frames(const std::string& ffmpeg, const VideoInfo& info, std::int64_t index,
+                               std::int64_t count, CancelToken* cancel, const std::optional<Geometry>& target,
+                               const std::optional<Crop>& crop) {
+    std::vector<Frame> frames;
+    const std::vector<std::int64_t> indices = decode_frames(
+        ffmpeg, info, index, count, [&frames](Frame& frame) { frames.push_back(std::move(frame)); }, cancel, target,
+        crop);
+    for (std::size_t k = 0; k < frames.size(); ++k) {
+        frames[k].index = indices[k];
     }
     return frames;
 }
@@ -204,10 +224,48 @@ std::int64_t extract_raw(const std::string& ffmpeg, const VideoInfo& info, std::
     return error ? 0 : static_cast<std::int64_t>(size / geometry.frame_bytes());
 }
 
+namespace {
+
+// A raw planar file, read a plane at a time straight into the planes.
+class RawFile {
+public:
+    RawFile(const std::filesystem::path& path, const Geometry& geometry)
+        : path_(path), geometry_(geometry), file_(path, std::ios::binary) {}
+
+    // Reads frame `frame`'s luma, or all its planes, into `into`.
+    void read(std::int64_t frame, Frame& into, bool luma_only = false) {
+        file_.seekg(static_cast<std::streamoff>(frame) * static_cast<std::streamoff>(geometry_.frame_bytes()));
+        if (!read_plane(into.y) || (!luma_only && (!read_plane(into.u) || !read_plane(into.v)))) {
+            throw std::runtime_error("frame " + std::to_string(frame) + " is not in " + utf8(path_.filename()));
+        }
+    }
+
+private:
+    bool read_plane(Plane& plane) {
+        if (geometry_.sample_bytes() == 2) {  // x64 is little-endian, as the data
+            file_.read(reinterpret_cast<char*>(plane.samples.data()), static_cast<std::streamsize>(plane.bytes()));
+            return static_cast<bool>(file_);
+        }
+        scratch_.resize(plane.samples.size());
+        file_.read(reinterpret_cast<char*>(scratch_.data()), static_cast<std::streamsize>(scratch_.size()));
+        std::copy(scratch_.begin(), scratch_.end(), plane.samples.begin());
+        return static_cast<bool>(file_);
+    }
+
+    std::filesystem::path path_;
+    Geometry geometry_;
+    std::ifstream file_;
+    std::vector<std::uint8_t> scratch_;
+};
+
+}  // namespace
+
 LumaStack luma_planes(const std::filesystem::path& path, const Geometry& geometry, std::int64_t count) {
     LumaStack stack{geometry.width, geometry.height, {}};
+    RawFile file(path, geometry);
+    Frame frame = make_frame(geometry, 0);
     for (std::int64_t k = 0; k < count; ++k) {
-        const Frame frame = read_raw_frame(path, geometry, k, k);
+        file.read(k, frame, true);
         stack.planes.emplace_back(frame.y.samples.begin(), frame.y.samples.end());
     }
     return stack;
@@ -215,14 +273,9 @@ LumaStack luma_planes(const std::filesystem::path& path, const Geometry& geometr
 
 Frame read_raw_frame(const std::filesystem::path& path, const Geometry& geometry, std::int64_t frame,
                      std::int64_t index) {
-    std::ifstream file(path, std::ios::binary);
-    file.seekg(static_cast<std::streamoff>(frame) * static_cast<std::streamoff>(geometry.frame_bytes()));
-    std::vector<std::uint8_t> data(geometry.frame_bytes());
-    file.read(reinterpret_cast<char*>(data.data()), static_cast<std::streamsize>(data.size()));
-    if (!file) {
-        throw std::runtime_error("frame " + std::to_string(frame) + " is not in " + utf8(path.filename()));
-    }
-    return frame_from_raw(data.data(), geometry, index);
+    Frame out = make_frame(geometry, index);
+    RawFile(path, geometry).read(frame, out);
+    return out;
 }
 
 }  // namespace fgw

@@ -17,9 +17,13 @@ inline const QString application_name = QStringLiteral("AFGS1 Grain Workbench");
 inline const QString settings_application = QStringLiteral("AFGS1Workbench");
 
 // The settings in the registry, where the app keeps them. With the
-// environment variable FGW_PROFILE set to a folder (for tests), they are in
-// settings.ini there instead, and the data folder is its data subfolder.
+// environment variable FGW_PROFILE set to a folder (for tests), they are
+// under test_settings_key(folder) instead, and the data folder is the
+// folder's data subfolder.
 QSettings* make_settings(QObject* parent);
+// HKEY_CURRENT_USER\Software\FilmGrainWorkbench-tests\<the folder's name>;
+// the test that made it deletes it.
+QString test_settings_key(const QString& profile);
 
 // %APPDATA%\AFGS1Workbench\AFGS1 Grain Workbench: saved analyses and errors.log.
 QString data_folder();

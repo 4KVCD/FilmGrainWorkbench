@@ -106,6 +106,8 @@ struct RunOptions {
     std::function<void(std::string_view)> on_error_line;
     // Written to standard input, then closed.
     std::shared_ptr<const std::string> input_data;
+    // At below-normal priority (platform::ProcessOptions::background).
+    bool background = false;
 };
 
 // The error a program that failed with `exit_code` is reported with:

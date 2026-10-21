@@ -70,7 +70,4 @@ struct Frame {
 // An empty frame of `geometry`.
 Frame make_frame(const Geometry& geometry, std::int64_t index = 0);
 
-// A frame from ffmpeg's raw output in `geometry`'s layout (frame_bytes() long).
-Frame frame_from_raw(const std::uint8_t* data, const Geometry& geometry, std::int64_t index);
-
 }  // namespace fgw

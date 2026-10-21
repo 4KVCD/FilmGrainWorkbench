@@ -20,8 +20,12 @@
 #include <QApplication>
 #include <QElapsedTimer>
 #include <QEventLoop>
+#include <QFileInfo>
 #include <QTemporaryDir>
 #include <QTimer>
+
+#include <windows.h>
+#include <psapi.h>
 
 #include "av1_tab.h"
 #include "settings.h"
@@ -59,8 +63,76 @@ private:
     qint64 worst_ = 0;
 };
 
+// Times every event the window's thread handles, in the CPU time it took
+// that thread, and keeps the slowest one: what a stall was spent on.
+class TimedApplication : public QApplication {
+public:
+    using QApplication::QApplication;
+
+    bool notify(QObject* receiver, QEvent* event) override {
+        if (depth_++ > 0) {  // an event inside an event: its time counts for the outer one
+            const bool handled = QApplication::notify(receiver, event);
+            --depth_;
+            return handled;
+        }
+        const QEvent::Type type = event->type();  // the event may be gone afterwards
+        const QString name = QString(receiver->metaObject()->className()) +
+                             (receiver->objectName().isEmpty() ? QString() : "/" + receiver->objectName());
+        const std::uint64_t start = thread_cycles();
+        const bool handled = QApplication::notify(receiver, event);
+        --depth_;
+        if (const double ms = static_cast<double>(thread_cycles() - start) / cycles_per_ms_; ms > slowest_ms_) {
+            slowest_ms_ = ms;
+            slowest_ = QString("%1 event %2").arg(name).arg(static_cast<int>(type));
+        }
+        return handled;
+    }
+
+    // The slowest event since the last call: "12.3 ms Receiver event 12".
+    QString take_slowest() {
+        const QString text = slowest_ms_ > 0 ? QString("%1 ms %2").arg(slowest_ms_, 0, 'f', 1).arg(slowest_) : QString();
+        slowest_ms_ = 0;
+        return text;
+    }
+
+private:
+    // The cycles the window's thread ran: unlike the clock, they do not count
+    // the time other programs had the CPU.
+    static std::uint64_t thread_cycles() {
+        ULONG64 cycles = 0;
+        QueryThreadCycleTime(GetCurrentThread(), &cycles);
+        return cycles;
+    }
+
+    // Cycles per ms, from a 30 ms busy loop.
+    static double measure_cycles_per_ms() {
+        QElapsedTimer clock;
+        clock.start();
+        const std::uint64_t start = thread_cycles();
+        while (clock.nsecsElapsed() < 30'000'000) {
+        }
+        return static_cast<double>(thread_cycles() - start) / (static_cast<double>(clock.nsecsElapsed()) / 1e6);
+    }
+
+    double cycles_per_ms_ = measure_cycles_per_ms();
+    int depth_ = 0;
+    double slowest_ms_ = 0;
+    QString slowest_;
+};
+
+// The process's working set now and at most, in MB.
+QString memory_text() {
+    PROCESS_MEMORY_COUNTERS_EX counters{};
+    counters.cb = sizeof counters;
+    GetProcessMemoryInfo(GetCurrentProcess(), reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&counters), sizeof counters);
+    return QString("RAM %1 MB (peak %2)")
+        .arg(counters.WorkingSetSize >> 20)
+        .arg(counters.PeakWorkingSetSize >> 20);
+}
+
 struct Walkthrough {
     Workbench& window;
+    TimedApplication& app;
     StallMeter stalls;
     QElapsedTimer step_clock;
     int failures = 0;
@@ -83,14 +155,17 @@ struct Walkthrough {
     void begin() {
         step_clock.start();
         stalls.take_worst_ms();
+        app.take_slowest();
     }
 
-    // Prints one step's result: "ok" or "FAILED", its time and the longest stall.
+    // Prints one step's result: "ok" or "FAILED", its time, the longest
+    // stall and the slowest event, the memory, and what the window showed.
     void report(const char* step, bool ok, const QString& detail = {}) {
         failures += ok ? 0 : 1;
-        std::printf("%-6s %-44s %8.2f s  longest stall %6.1f ms  %s\n", ok ? "ok" : "FAILED", step,
+        std::printf("%-6s %-40s %7.2f s  stall %5.1f ms  %s\n       slowest: %s  %s\n", ok ? "ok" : "FAILED", step,
                     static_cast<double>(step_clock.elapsed()) / 1000, stalls.take_worst_ms(),
-                    detail.toUtf8().constData());
+                    detail.toUtf8().constData(), app.take_slowest().toUtf8().constData(),
+                    memory_text().toUtf8().constData());
         std::fflush(stdout);
     }
 
@@ -126,6 +201,7 @@ struct Walkthrough {
         for (const View view : all_views) {
             tab.set_mode(view);
             modes = modes && tab.state_->mode() == view;
+            wait([] { return false; }, 0.1);  // painted, as a user would see it
         }
         report("every view", modes);
 
@@ -188,6 +264,7 @@ struct Walkthrough {
         for (const View view : all_views) {
             tab.set_mode(view);
             modes = modes && tab.state_->mode() == view;
+            wait([] { return false; }, 0.1);  // painted, as a user would see it
         }
         report("every view", modes);
 
@@ -197,6 +274,8 @@ struct Walkthrough {
         }
         ok = wait([&] { return idle() && tab.state_->has(grain_view); });
         report("step 5 frames in the scene", ok, tab.caption(tab.current_index_));
+        // The side panel's numbers: to compare runs before and after a change.
+        std::printf("panel:\n%s\n", tab.info_label_->text().toUtf8().constData());
     }
 };
 
@@ -209,7 +288,7 @@ int main(int argc, char* argv[]) {
     if (qEnvironmentVariableIsEmpty("QT_QPA_PLATFORM")) {
         qputenv("QT_QPA_PLATFORM", "offscreen");  // nothing appears on the screen
     }
-    QApplication app(argc, argv);
+    TimedApplication app(argc, argv);
     QApplication::setApplicationName(application_name);
     QApplication::setOrganizationName(organisation_name);
     QApplication::setApplicationVersion(FGW_VERSION);
@@ -223,7 +302,7 @@ int main(int argc, char* argv[]) {
     auto* window = new Workbench(settings);
     window->resize(1600, 1000);
     window->show();
-    Walkthrough walk{*window, {}, {}, 0};
+    Walkthrough walk{*window, app, {}, {}, 0};
     walk.wait([] { return false; }, 0.5);  // let the tabs start up
     if (args[0] == "av1") {
         walk.av1(args[1], args[2], args.value(3));
@@ -234,5 +313,11 @@ int main(int argc, char* argv[]) {
     window->close();
     delete window;
     walk.report("close", true);
+
+    // The profile's registry key, and the tests' key once no profile is left in it.
+    delete settings;
+    const std::wstring tests = L"Software\\FilmGrainWorkbench-tests";
+    RegDeleteTreeW(HKEY_CURRENT_USER, (tests + L"\\" + QFileInfo(profile.path()).fileName().toStdWString()).c_str());
+    RegDeleteKeyW(HKEY_CURRENT_USER, tests.c_str());  // fails, as it should, while it has subkeys
     return walk.failures ? 1 : 0;
 }

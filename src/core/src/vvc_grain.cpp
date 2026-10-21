@@ -507,13 +507,16 @@ Clip encode_scene(const VvcTools& tools, const SceneCut& cut, const VvcSettings&
             encode.insert(encode.end(), {"--hdr", cut.hdr});
         }
         encode.insert(encode.end(), {"-o", utf8(folder / "clip.266")});
-        run_tool(encode, cancel);
+        // VVenC and vvdec use every core, often while the window is browsed.
+        RunOptions background;
+        background.background = true;
+        run_tool(encode, cancel, background);
         const double encode_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
 
         progress(-1, format("Decoding --fga %d with vvdec, without and with its grain synthesis…", settings.fga));
         const auto decode = [&](const char* file, const char* synthesis) {
             run_tool({tools.vvdecapp, "-b", utf8(folder / "clip.266"), "-o", utf8(folder / file), "-fg", synthesis},
-                     cancel);
+                     cancel, background);
         };
         auto without = std::async(std::launch::async, decode, "decoded.yuv", "0");
         auto with = std::async(std::launch::async, decode, "grain.yuv", "1");

@@ -16,9 +16,15 @@ QString test_profile() { return qEnvironmentVariable("FGW_PROFILE"); }
 
 QSettings* make_settings(QObject* parent) {
     if (const QString profile = test_profile(); !profile.isEmpty()) {
-        return new QSettings(QDir(profile).filePath("settings.ini"), QSettings::IniFormat, parent);
+        // In the registry like the real settings, so a test measures what the
+        // app does (an INI file is flushed to disk on every save).
+        return new QSettings(test_settings_key(profile), QSettings::NativeFormat, parent);
     }
     return new QSettings(organisation_name, settings_application, parent);
+}
+
+QString test_settings_key(const QString& profile) {
+    return R"(HKEY_CURRENT_USER\Software\FilmGrainWorkbench-tests\)" + QFileInfo(profile).fileName();
 }
 
 QString data_folder() {

@@ -194,16 +194,27 @@ LumaImage quarter_luma(const Plane& luma) {
 Alignment check_place(const Tools& tools, const VideoInfo& source, const VideoInfo& encoded, std::int64_t offset,
                       const std::optional<Crop>& crop, std::int64_t place, CancelToken* cancel) {
     const Geometry geometry = geometry_of(encoded);
-    std::map<std::int64_t, LumaImage> source_by_index;
-    for (const Frame& frame : read_frames(tools.ffmpeg, source, place + offset, preflight_frames, cancel, geometry, crop)) {
-        source_by_index.emplace(frame.index - offset, quarter_luma(frame.y));
+    // Only a quarter-size luma of each frame is kept, not the frames (25 MB each at 4K).
+    const auto quarter_lumas = [&](const VideoInfo& info, std::int64_t index, const std::optional<Geometry>& target,
+                                   const std::optional<Crop>& frame_crop) {
+        std::vector<LumaImage> lumas;
+        std::vector<std::int64_t> indices = decode_frames(
+            tools.ffmpeg, info, index, preflight_frames, [&lumas](Frame& frame) { lumas.push_back(quarter_luma(frame.y)); },
+            cancel, target, frame_crop);
+        return std::pair{std::move(indices), std::move(lumas)};
+    };
+    const auto [source_indices, source_lumas] = quarter_lumas(source, place + offset, geometry, crop);
+    std::map<std::int64_t, const LumaImage*> source_by_index;
+    for (std::size_t k = 0; k < source_lumas.size(); ++k) {
+        source_by_index.emplace(source_indices[k] - offset, &source_lumas[k]);
     }
+    const auto [encoded_indices, encoded_lumas] = quarter_lumas(encoded, place, std::nullopt, std::nullopt);
     std::vector<LumaImage> source_run;
     std::vector<LumaImage> encoded_run;
-    for (const Frame& frame : read_frames(tools.ffmpeg, encoded, place, preflight_frames, cancel)) {
-        if (const auto paired = source_by_index.find(frame.index); paired != source_by_index.end()) {
-            source_run.push_back(paired->second);
-            encoded_run.push_back(quarter_luma(frame.y));
+    for (std::size_t k = 0; k < encoded_lumas.size(); ++k) {
+        if (const auto paired = source_by_index.find(encoded_indices[k]); paired != source_by_index.end()) {
+            source_run.push_back(*paired->second);
+            encoded_run.push_back(encoded_lumas[k]);
         }
     }
     if (source_run.size() < 3) {
@@ -345,15 +356,19 @@ struct RunResult {
 RunResult run_pipeline(const std::vector<std::string>& ffmpeg_command, const std::vector<std::string>& analyzer_command,
                        std::int64_t first, std::int64_t start, std::int64_t last, bool resume,
                        const Progress& progress, CancelToken* cancel) {
+    // Hours on every core, while the window is browsed: below-normal priority.
+    platform::ProcessOptions decoder_options;
+    decoder_options.background = true;
     platform::ChildProcess decoder = [&] {
         try {
-            return platform::ChildProcess::start(ffmpeg_command);
+            return platform::ChildProcess::start(ffmpeg_command, decoder_options);
         } catch (const platform::ProcessError& error) {
             throw ToolError("ffmpeg could not be started: " + std::string(error.what()));
         }
     }();
     const CancelToken::Tracking decoder_tracking(cancel, decoder);
     platform::ProcessOptions worker_options;
+    worker_options.background = true;
     worker_options.input_from = &decoder;  // the analyzer owns the pipe now
     platform::ChildProcess worker = [&] {
         try {

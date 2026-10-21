@@ -230,9 +230,17 @@ WriteReport write_afgs1_mkv(const Tools& tools, const VideoInfo& encoded, const 
         throw std::invalid_argument("the output must not overwrite the encoded input");
     }
     const PictureFormat picture = picture_format(encoded);
-    std::map<std::int64_t, std::unique_ptr<T35Template>> templates;  // by GrainPlan::key_at
+    // By GrainPlan::key_at. Up to 4,096: a whole-film plan has ~150,000 keys,
+    // and pictures come in decode order, so a key is met again only within a
+    // GOP; one dropped is made again, the same.
+    constexpr std::size_t kept_templates = 4096;
+    std::map<std::int64_t, std::unique_ptr<T35Template>> templates;
     const auto template_for = [&](std::int64_t index) -> const T35Template& {
-        auto& slot = templates[plan.key_at(index)];
+        const std::int64_t key = plan.key_at(index);
+        if (templates.size() >= kept_templates && !templates.contains(key)) {
+            templates.clear();
+        }
+        auto& slot = templates[key];
         if (!slot) {
             const std::optional<GrainParams> params = plan.params_at(index);
             if (!params) {

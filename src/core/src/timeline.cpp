@@ -10,6 +10,14 @@ namespace fgw {
 
 using json = nlohmann::ordered_json;  // keys in the order the Python app wrote them
 
+namespace {
+
+// Scaled parameters a TimelinePlan keeps. A whole-film Write meets ~150,000
+// segments (libaom's model changes on almost every frame), ~0.8 KB each.
+constexpr std::size_t cached_segments = 4096;
+
+}  // namespace
+
 TimelineModel::TimelineModel(std::vector<Segment> segments, int bit_depth_, int subsampling_x_, int subsampling_y_,
                              Rational fps_, std::int64_t frames_)
     : bit_depth(bit_depth_),
@@ -125,6 +133,9 @@ std::optional<GrainParams> TimelinePlan::params_at(std::int64_t index) const {
     const std::lock_guard lock(mutex_);
     auto cached = cache_.find(segment.start);
     if (cached == cache_.end()) {
+        if (cache_.size() >= cached_segments) {
+            cache_.clear();  // scaled again when met again: the same parameters
+        }
         ScaledParams scaled = scale_params(segment.params, tuning_, subsampled_420_);
         any_clipped_ = any_clipped_ || scaled.clipped;
         cached = cache_.emplace(segment.start, std::move(scaled.params)).first;

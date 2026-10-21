@@ -12,6 +12,8 @@
 #include <QShortcut>
 #include <QVBoxLayout>
 
+#include "release.h"
+
 namespace fgw::app {
 
 namespace {
@@ -32,8 +34,10 @@ QImage PreviewState::image() const {
     return found == images_.end() ? QImage() : found->second;
 }
 
+// The pictures replaced are freed by release_later: at 4K, 33 MB each.
+
 void PreviewState::set_images(std::map<View, QImage> images, QString caption) {
-    images_ = std::move(images);
+    release_later(std::exchange(images_, std::move(images)));
     caption_ = std::move(caption);
     if (!images_.contains(mode_)) {
         mode_ = images_.contains(encoded_view) || images_.empty() ? encoded_view : images_.begin()->first;
@@ -42,18 +46,22 @@ void PreviewState::set_images(std::map<View, QImage> images, QString caption) {
 }
 
 void PreviewState::update_images(const std::map<View, QImage>& images) {
+    std::vector<QImage> replaced;
     for (const auto& [view, image] : images) {
-        if (image.isNull()) {
-            images_.erase(view);
-        } else {
+        if (const auto old = images_.find(view); old != images_.end()) {
+            replaced.push_back(std::move(old->second));
+            images_.erase(old);
+        }
+        if (!image.isNull()) {
             images_[view] = image;
         }
     }
+    release_later(std::move(replaced));
     emit changed();
 }
 
 void PreviewState::clear(QString placeholder) {
-    images_.clear();
+    release_later(std::exchange(images_, {}));
     placeholder_ = std::move(placeholder);
     emit changed();
 }

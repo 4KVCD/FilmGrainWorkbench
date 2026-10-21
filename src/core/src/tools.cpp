@@ -193,6 +193,7 @@ ToolOutput run_tool(const std::vector<std::string>& command, CancelToken* cancel
     platform::ProcessOptions process_options;
     process_options.on_error_line = options.on_error_line;
     process_options.input_data = options.input_data;
+    process_options.background = options.background;
     platform::ChildProcess child = [&] {
         try {
             return platform::ChildProcess::start(command, process_options);

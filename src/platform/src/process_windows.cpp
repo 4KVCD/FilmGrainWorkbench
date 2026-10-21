@@ -242,9 +242,10 @@ ChildProcess ChildProcess::start(const std::vector<std::string>& arguments, cons
     PROCESS_INFORMATION started{};
     // Started suspended, so that it is in its job before it can start
     // anything of its own.
+    const DWORD priority = options.background ? BELOW_NORMAL_PRIORITY_CLASS : 0;
     const BOOL made = CreateProcessW(nullptr, line.data(), nullptr, nullptr, TRUE,
                                      CREATE_NO_WINDOW | CREATE_SUSPENDED | EXTENDED_STARTUPINFO_PRESENT |
-                                         CREATE_UNICODE_ENVIRONMENT,
+                                         CREATE_UNICODE_ENVIRONMENT | priority,
                                      nullptr, folder.empty() ? nullptr : folder.c_str(), &startup.StartupInfo,
                                      &started);
     const DWORD start_error = made ? ERROR_SUCCESS : GetLastError();

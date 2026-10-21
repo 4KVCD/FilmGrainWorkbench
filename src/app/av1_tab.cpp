@@ -26,6 +26,7 @@
 #include "fgw/frames.h"
 #include "fgw/fullscan.h"
 #include "fgw/text.h"
+#include "release.h"
 #include "settings.h"
 
 namespace fgw::app {
@@ -84,14 +85,29 @@ void FrameCache::trim(std::size_t budget_bytes) {
     for (auto entry = entries_.rbegin(); entry != entries_.rend(); ++entry) {
         kept += entry->frame->bytes();
         if (kept > budget_bytes) {
-            entries_.erase(entries_.begin(), entry.base());  // this one and everything older
+            // This one and everything older.
+            std::vector<Entry> dropped(std::make_move_iterator(entries_.begin()), std::make_move_iterator(entry.base()));
+            entries_.erase(entries_.begin(), entry.base());
+            release_later(std::move(dropped));
             return;
         }
     }
 }
 
+void FrameCache::clear() { release_later(std::exchange(entries_, {})); }
+
 void FrameCache::drop_source_frames() {
-    std::erase_if(entries_, [](const Entry& e) { return e.key.source; });
+    std::vector<Entry> dropped;
+    std::deque<Entry> kept;
+    for (Entry& entry : entries_) {
+        if (entry.key.source) {
+            dropped.push_back(std::move(entry));
+        } else {
+            kept.push_back(std::move(entry));
+        }
+    }
+    entries_ = std::move(kept);
+    release_later(std::move(dropped));
 }
 
 // ---------------------------------------------------------------- the tab

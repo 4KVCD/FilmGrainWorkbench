@@ -3,6 +3,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <optional>
 #include <string>
 #include <vector>
@@ -52,6 +53,16 @@ std::vector<Frame> read_frames(const std::string& ffmpeg, const VideoInfo& info,
                                std::int64_t count, CancelToken* cancel = nullptr,
                                const std::optional<Geometry>& target = std::nullopt,
                                const std::optional<Crop>& crop = std::nullopt);
+
+// read_frames for a caller that keeps only part of each frame: hands each
+// frame to `each` as it arrives (`each` may move it away; the next one is
+// then made anew), and returns the frames' true indices, in order, which
+// are known only once ffmpeg has finished.
+std::vector<std::int64_t> decode_frames(const std::string& ffmpeg, const VideoInfo& info, std::int64_t index,
+                                        std::int64_t count, const std::function<void(Frame&)>& each,
+                                        CancelToken* cancel = nullptr,
+                                        const std::optional<Geometry>& target = std::nullopt,
+                                        const std::optional<Crop>& crop = std::nullopt);
 
 Frame read_frame(const std::string& ffmpeg, const VideoInfo& info, std::int64_t index, CancelToken* cancel = nullptr,
                  const std::optional<Geometry>& target = std::nullopt, const std::optional<Crop>& crop = std::nullopt);

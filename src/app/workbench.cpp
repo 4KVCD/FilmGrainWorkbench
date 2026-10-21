@@ -87,9 +87,12 @@ void Workbench::closeEvent(QCloseEvent* event) {
         event->ignore();
         return;
     }
+    settings_->setValue("shell/geometry", saveGeometry());
+    // Gone from the screen at once: deleting the VVC tab's scene files takes
+    // about a second (33 frames at 4K).
+    hide();
     vvc_->shutdown();
     av1_->shutdown();
-    settings_->setValue("shell/geometry", saveGeometry());
     event->accept();
 }
 

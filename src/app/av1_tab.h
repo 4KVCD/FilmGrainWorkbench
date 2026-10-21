@@ -65,8 +65,9 @@ public:
 
     std::shared_ptr<const Frame> get(const Key& key);  // and marks it used
     void put(const Key& key, std::shared_ptr<const Frame> frame);
+    // These three free what they drop on a pool thread (release_later).
     void trim(std::size_t budget_bytes);
-    void clear() { entries_.clear(); }
+    void clear();
     void drop_source_frames();
 
 private:

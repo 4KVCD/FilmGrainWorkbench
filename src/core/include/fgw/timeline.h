@@ -74,7 +74,7 @@ private:
     Tuning tuning_;
     bool subsampled_420_;
     mutable std::mutex mutex_;
-    mutable std::map<std::int64_t, GrainParams> cache_;  // by segment start
+    mutable std::map<std::int64_t, GrainParams> cache_;  // by segment start; emptied when full (timeline.cpp)
     mutable bool any_clipped_ = false;
 };
 

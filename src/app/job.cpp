@@ -1,6 +1,9 @@
 #include "job.h"
 
 #include <exception>
+#include <utility>
+
+#include "release.h"
 
 namespace fgw::app {
 
@@ -26,6 +29,7 @@ void Job::run() {
         outcome_ = Outcome::failed;
         error_ = QStringLiteral("unexpected error");
     }
+    work_ = nullptr;  // what it holds (frames, often) is freed here, not on the window's thread
 }
 
 void Job::deliver_outcome() {
@@ -43,6 +47,7 @@ void Job::deliver_outcome() {
             emit cancelled();
             break;
     }
+    release_later(std::exchange(deliver_, nullptr));
     emit ended();
     deleteLater();
 }

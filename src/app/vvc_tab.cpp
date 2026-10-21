@@ -18,6 +18,7 @@
 
 #include "fgw/frames.h"
 #include "fgw/text.h"
+#include "release.h"
 #include "settings.h"
 
 namespace fgw::app {
@@ -308,7 +309,7 @@ void VvcTab::load_source() {
         return;
     }
     retire_scene();  // a running job is cancelled when its result arrives
-    source_frames_.clear();
+    release_later(std::exchange(source_frames_, {}));
     converter_.reset();
     source_.reset();
     crop_.reset();
@@ -356,7 +357,7 @@ void VvcTab::source_probed(const VideoInfo& info) {
 
 void VvcTab::crop_toggled() {
     save();
-    source_frames_.clear();
+    release_later(std::exchange(source_frames_, {}));
     retire_scene();
     if (source_) {
         converter_.reset();
@@ -772,6 +773,7 @@ void VvcTab::render_source(std::int64_t index) {
                 source_frames_.push_back({frame->index, crop, frame});
             }
             while (source_frames_.size() > source_cache) {
+                release_later(std::move(source_frames_.front()));
                 source_frames_.pop_front();
             }
             if (index != current_index_) {

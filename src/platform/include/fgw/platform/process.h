@@ -68,6 +68,10 @@ struct ProcessOptions {
     // Else, if set, written to the program's standard input on a thread of
     // its own, which then closes it. Else the program reads nothing (NUL).
     std::shared_ptr<const std::string> input_data;
+    // Runs at below-normal priority: long work on every core (an encoder)
+    // that must not keep the window's thread waiting for a turn. It still
+    // gets all the CPU nothing else wants.
+    bool background = false;
 };
 
 // A program run to its end: its exit code, everything it wrote to standard
