@@ -59,10 +59,13 @@ Tests: `.venv\Scripts\python -m pip install -r requirements-dev.txt` then
 VVC's own film grain, instead of AV1's: `"Run VVC Grain Analyzer.bat"`, or
 *Window → VVC grain analyzer* in the workbench. Choose a source video and
 browse it for a scene: only the source is decoded while you look. *Encode
-this scene* (E) encodes the frames around the one shown with VVenC and its
-film grain analysis (`--fga`), which writes an H.274 film grain
-characteristics SEI message, and decodes them with vvdec twice. Inside the
-encoded scene, the views are:
+this scene* (E) encodes the frames around the one shown with VVenC in all
+three film grain analysis modes (`--fga 1`, `2`, `3`), each writing an H.274
+film grain characteristics SEI message, and decodes them with vvdec twice. The
+selected mode is shown as soon as it is ready; the other two are encoded in
+the background, so switching modes is then instant. VVenC analyses the grain
+on the first picture of every GOP (32 frames); the pictures in between carry
+the latest parameters. Inside the encoded scene, the views are:
 
 1. **Source**: the source frame, cropped like the encode.
 2. **VVC, grain removed**: what VVenC coded (its MCTF pre-filter and the
@@ -73,8 +76,14 @@ encoded scene, the views are:
 The side panel shows the grain parameters the frame carries (read from the
 bitstream, both the frequency and the auto-regressive model), how much grain
 VVenC removed and vvdec adds, and the colour shift the grain causes. Inside an
-encoded scene, changing the analysis mode, strength, QP, preset or scene
-length encodes the scene again; outside it, nothing is encoded.
+encoded scene, changing the strength, QP, preset or scene length encodes the
+scene again (all three modes); outside it, nothing is encoded.
+
+Temporary files: one scene at a time, in a folder in `%TEMP%` (for 33 frames
+at 3840×1608 about 4.3 GB: the source frames once, and each mode decoded with
+and without grain). Whatever is replaced is deleted as soon as nothing reads
+it, the folder when the window closes, and folders left by a crash when the
+next window opens.
 
 vvencapp and vvdecapp are built by `vvc\build_vvc_tools.ps1` (Visual Studio
 2022 and CMake) into `bin`: VVenC from fraunhoferhhi/vvenc pull request 765,

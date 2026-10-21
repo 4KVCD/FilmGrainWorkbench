@@ -16,9 +16,11 @@ from __future__ import annotations
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
+from fractions import Fraction
 from pathlib import Path
 import re
 import shutil
+import tempfile
 import time
 
 import numpy as np
@@ -64,7 +66,11 @@ class VvcSettings:
     strength: int = 100           # --fgastrength, percent of the analysed grain
     qp: float = 28.0
     preset: str = "faster"
-    frames: int = 33              # clip length: one 32-frame GOP plus the next intra frame
+    frames: int = 33              # scene length: one 32-frame GOP plus the next intra frame
+
+    def without_mode(self) -> tuple:
+        """Everything but --fga: the encodes of the three modes of a scene share it."""
+        return self.strength, self.qp, self.preset, self.frames
 
 
 @dataclass
@@ -102,15 +108,31 @@ class GrainSet:
 
 
 @dataclass
+class SceneCut:
+    """The source frames of a scene, cut once and encoded by every analysis mode."""
+    start: int                                     # first source frame (a cut file may start later)
+    count: int
+    geometry: Geometry
+    crop: Crop | None
+    fps: Fraction
+    folder: Path
+
+    @property
+    def source_file(self) -> Path:
+        return self.folder / _FILES[SOURCE]
+
+
+@dataclass
 class Clip:
-    """A clip encoded and decoded with the given settings; frames live in raw files."""
+    """A scene encoded and decoded with the given settings; frames live in raw files."""
     start: int                                     # first source frame
     count: int
     geometry: Geometry
-    folder: Path
+    folder: Path                                   # this encode's own files
     settings: VvcSettings
     crop: Crop | None
     fps: float
+    source_file: Path                              # the scene's source frames, shared with other modes
     grain: list[GrainSet | None] = field(default_factory=list)
     encode_seconds: float = 0.0
 
@@ -130,8 +152,8 @@ class Clip:
         k = index - self.start
         if not 0 <= k < self.count:
             raise IndexError(f"frame {index} is not in the clip {self.start}–{self.start + self.count - 1}")
-        data = np.fromfile(self.folder / _FILES[which], dtype=np.uint16, count=g.frame_bytes // 2,
-                           offset=k * g.frame_bytes)
+        path = self.source_file if which == SOURCE else self.folder / _FILES[which]
+        data = np.fromfile(path, dtype=np.uint16, count=g.frame_bytes // 2, offset=k * g.frame_bytes)
         y, u, v = split_planes(data, g)
         return Frame(index, y, u, v, g)
 
@@ -141,6 +163,29 @@ class Clip:
 
     def remove(self) -> None:
         shutil.rmtree(self.folder, ignore_errors=True)
+
+
+WORK_PREFIX = "afgs1wb-vvc-"
+_IN_USE = ".in-use"
+
+
+def open_work_dir(parent: Path | None = None) -> tuple[Path, object]:
+    """A new folder for a window's scenes, with a lock file that stays open while the window lives.
+
+    Folders of earlier runs that ended without cleaning up (a crash, a killed
+    process) are deleted first. A folder whose lock file cannot be deleted
+    belongs to a window still open (Windows keeps open files) and is left alone.
+    """
+    parent = Path(parent or tempfile.gettempdir())
+    for old in parent.glob(WORK_PREFIX + "*"):
+        lock = old / _IN_USE
+        try:
+            lock.unlink(missing_ok=True)
+        except OSError:
+            continue                               # in use by another window
+        shutil.rmtree(old, ignore_errors=True)
+    folder = Path(tempfile.mkdtemp(prefix=WORK_PREFIX, dir=parent))
+    return folder, open(folder / _IN_USE, "w")
 
 
 def detect_black_bars(ffmpeg: str, info: VideoInfo, cancel: CancelToken | None = None) -> Crop | None:
@@ -331,54 +376,75 @@ def read_grain(bitstream: bytes) -> list[GrainSet | None]:
     return result
 
 
-def make_clip(ffmpeg: str, tools: VvcTools, info: VideoInfo, start: int,
-              settings: VvcSettings, crop: Crop | None, folder: Path, cancel: CancelToken,
-              progress) -> Clip:
-    """Cut ``settings.frames`` source frames from ``start``, encode them with VVenC, decode twice."""
-    if tools.missing():
-        raise ToolError("Not found: " + ", ".join(tools.missing()) + " (run vvc\\build_vvc_tools.ps1)")
+def cut_scene(ffmpeg: str, info: VideoInfo, start: int, frames: int, crop: Crop | None, folder: Path,
+              cancel: CancelToken, progress) -> SceneCut:
+    """Write ``frames`` source frames from ``start`` as raw 10-bit 4:2:0, the input of every encode."""
     width, height = (crop.width, crop.height) if crop else (info.width, info.height)
     if width % 2 or height % 2:
         raise ValueError(f"VVenC needs an even picture size, not {width}×{height}")
     geometry = Geometry(width, height, 10, 1, 1)          # VVenC codes 10-bit 4:2:0
     folder.mkdir(parents=True, exist_ok=True)
     source = folder / _FILES[SOURCE]
-
-    progress(-1, f"Reading source frames {start:,}–{start + settings.frames - 1:,}…")
-    _, log = run_with_log(_command(ffmpeg, info, start, settings.frames, geometry, crop, str(source),
+    progress(-1, f"Reading source frames {start:,}–{start + frames - 1:,}…")
+    _, log = run_with_log(_command(ffmpeg, info, start, frames, geometry, crop, str(source),
                                    with_times=True), cancel)
     count = source.stat().st_size // geometry.frame_bytes if source.exists() else 0
     if count == 0:
         raise RuntimeError(f"{info.path.name}: frame {start} could not be decoded")
     times = [float(t) for t in _PTS_TIME.findall(log)]
     first = frame_index(info, times[0]) if times else start   # a cut file may start later
+    return SceneCut(first, count, geometry, crop, info.fps, folder)
 
-    fps = info.fps
-    progress(-1, f"Encoding {count} frames with VVenC (--fga {settings.fga}, QP {settings.qp:g}, "
-                 f"{settings.preset})…")
-    started = time.perf_counter()
-    run([tools.vvencapp, "-i", str(source), "-s", f"{width}x{height}", "-c", "yuv420_10",
-         "--fps", f"{fps.numerator}/{fps.denominator}", "-f", str(count),
-         "--qp", f"{settings.qp:g}", "--preset", settings.preset,
-         "--fga", str(settings.fga), "--fgastrength", str(settings.strength),
-         "-o", str(folder / "clip.266")], cancel)
-    encode_seconds = time.perf_counter() - started
 
-    progress(-1, "Decoding with vvdec, without and with its film grain synthesis…")
+def encode_scene(tools: VvcTools, cut: SceneCut, settings: VvcSettings, cancel: CancelToken,
+                 progress) -> Clip:
+    """Encode a cut scene with VVenC in one analysis mode and decode it twice, in its own folder.
 
-    def decode(which: str, synthesis: int) -> None:
-        run([tools.vvdecapp, "-b", str(folder / "clip.266"), "-o", str(folder / _FILES[which]),
-             "-fg", str(synthesis)], cancel)
-    with ThreadPoolExecutor(2) as pool:
-        jobs = [pool.submit(decode, DECODED, 0), pool.submit(decode, GRAIN, 1)]
-        grain = read_grain((folder / "clip.266").read_bytes())
-        for job in jobs:
-            job.result()
-    for which in (DECODED, GRAIN):
-        size = (folder / _FILES[which]).stat().st_size
-        if size != count * geometry.frame_bytes:
-            raise RuntimeError(f"vvdec wrote {size // geometry.frame_bytes} of {count} frames")
-    return Clip(first, count, geometry, folder, settings, crop, float(fps), grain, encode_seconds)
+    The folder is deleted again if anything fails or the work is cancelled.
+    """
+    if tools.missing():
+        raise ToolError("Not found: " + ", ".join(tools.missing()) + " (run vvc\\build_vvc_tools.ps1)")
+    folder = cut.folder / f"fga{settings.fga}-{time.monotonic_ns()}"
+    folder.mkdir()
+    try:
+        g, fps = cut.geometry, cut.fps
+        progress(-1, f"Encoding {cut.count} frames with VVenC --fga {settings.fga} (QP {settings.qp:g}, "
+                     f"{settings.preset})…")
+        started = time.perf_counter()
+        run([tools.vvencapp, "-i", str(cut.source_file), "-s", f"{g.width}x{g.height}", "-c", "yuv420_10",
+             "--fps", f"{fps.numerator}/{fps.denominator}", "-f", str(cut.count),
+             "--qp", f"{settings.qp:g}", "--preset", settings.preset,
+             "--fga", str(settings.fga), "--fgastrength", str(settings.strength),
+             "-o", str(folder / "clip.266")], cancel)
+        encode_seconds = time.perf_counter() - started
+
+        progress(-1, f"Decoding --fga {settings.fga} with vvdec, without and with its grain synthesis…")
+
+        def decode(which: str, synthesis: int) -> None:
+            run([tools.vvdecapp, "-b", str(folder / "clip.266"), "-o", str(folder / _FILES[which]),
+                 "-fg", str(synthesis)], cancel)
+        with ThreadPoolExecutor(2) as pool:
+            jobs = [pool.submit(decode, DECODED, 0), pool.submit(decode, GRAIN, 1)]
+            grain = read_grain((folder / "clip.266").read_bytes())
+            for job in jobs:
+                job.result()
+        for which in (DECODED, GRAIN):
+            size = (folder / _FILES[which]).stat().st_size
+            if size != cut.count * g.frame_bytes:
+                raise RuntimeError(f"vvdec wrote {size // g.frame_bytes} of {cut.count} frames")
+    except BaseException:
+        shutil.rmtree(folder, ignore_errors=True)
+        raise
+    return Clip(cut.start, cut.count, g, folder, settings, cut.crop, float(fps), cut.source_file,
+                grain, encode_seconds)
+
+
+def make_clip(ffmpeg: str, tools: VvcTools, info: VideoInfo, start: int,
+              settings: VvcSettings, crop: Crop | None, folder: Path, cancel: CancelToken,
+              progress) -> Clip:
+    """Cut ``settings.frames`` source frames from ``start`` and encode them in one mode."""
+    cut = cut_scene(ffmpeg, info, start, settings.frames, crop, folder, cancel, progress)
+    return encode_scene(tools, cut, settings, cancel, progress)
 
 
 @dataclass

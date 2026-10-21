@@ -68,3 +68,16 @@ def test_clip_carries_and_shows_the_analysed_grain(tools, vvc_tools, film_crop, 
 
 def test_reading_grain_from_nothing_gives_nothing():
     assert read_grain(b"") == []
+
+
+def test_work_folders_of_crashed_windows_are_deleted_and_open_ones_kept(tmp_path):
+    from afgs1wb.vvcgrain import open_work_dir
+    crashed = tmp_path / "afgs1wb-vvc-crashed"
+    crashed.mkdir()
+    (crashed / ".in-use").write_text("")
+    (crashed / "source.yuv").write_bytes(b"x")
+    first, lock = open_work_dir(tmp_path)
+    assert not crashed.exists() and first.exists()
+    second, lock2 = open_work_dir(tmp_path)          # another window: the first one's folder stays
+    assert first.exists() and second.exists()
+    lock.close(), lock2.close()
