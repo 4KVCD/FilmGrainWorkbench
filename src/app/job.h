@@ -26,6 +26,8 @@ public:
     // Starts nothing yet: connect the signals, then start(). A job deletes
     // itself once its outcome is delivered; hold it in a QPointer.
     Job(QString name, Work work, QObject* parent);
+    // Cancels the work and waits for it, if it still runs.
+    ~Job() override;
 
     const QString& name() const { return name_; }
     // Asks the work to stop and ends the programs it runs.
@@ -54,9 +56,23 @@ private:
     Outcome outcome_ = Outcome::cancelled;
     Deliver deliver_;
     QString error_;
+    bool delivered_ = false;
+
+    friend bool running(const QPointer<Job>& job);
+    friend void stop_for_good(const QPointer<Job>& job, unsigned long wait_ms);
 };
 
-// Whether `job` still runs (a finished job is deleted, and reads as not running).
-inline bool running(const QPointer<Job>& job) { return job && !job->isFinished(); }
+// Whether `job` is still at work: running, or finished with its outcome not
+// yet delivered (a job whose thread has ended reads as running until then,
+// so nothing starts in its place before its results are in). A delivered
+// job deletes itself and reads as not running.
+inline bool running(const QPointer<Job>& job) { return job && !job->delivered_; }
+
+// For a window that is closing: cancels `job`, waits up to `wait_ms` for it
+// to end, and drops its outcome, so that nothing it would deliver (results,
+// or work started when it ends) arrives any more. A job still running then
+// is let go of rather than destroyed with its parent (a running thread
+// cannot be): the app's exit ends it, and its programs with it.
+void stop_for_good(const QPointer<Job>& job, unsigned long wait_ms);
 
 }  // namespace fgw::app

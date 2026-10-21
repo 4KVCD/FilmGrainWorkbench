@@ -1,23 +1,18 @@
 // Film Grain Workbench: the entry point.
 //
-//   FilmGrainWorkbench.exe [--vvc | --av1]          opens on that tab, else the one used last
-//   FilmGrainWorkbench.exe --check-installation FILE writes which programs were found to FILE;
-//                                                    exit code 0 when all answer, 1 otherwise
+//   "Film Grain Workbench.exe" [--vvc | --av1]          opens on that tab, else the one used last
+//   "Film Grain Workbench.exe" --check-installation FILE writes which programs were found to FILE;
+//                                                        exit code 0 when all answer, 1 otherwise
 #include <algorithm>
-#include <exception>
 #include <fstream>
 #include <memory>
 
-#include <QApplication>
-#include <QDateTime>
-#include <QDir>
 #include <QIcon>
-#include <QMessageBox>
-#include <QPointer>
 
 #include <windows.h>
 #include <shobjidl.h>
 
+#include "application.h"
 #include "fgw/installation.h"
 #include "fgw/text.h"
 #include "fgw/vvc_grain.h"
@@ -27,51 +22,6 @@
 
 namespace fgw::app {
 namespace {
-
-// Errors that escape a slot are reported instead of ending the app: written
-// to errors.log in the data folder, shown in the tab in view, and in a
-// message box. (Work on job threads reports its own errors; this is for the
-// window's thread.)
-class Application : public QApplication {
-public:
-    using QApplication::QApplication;
-
-    void set_window(Workbench* window) { window_ = window; }
-
-    bool notify(QObject* receiver, QEvent* event) override {
-        try {
-            return QApplication::notify(receiver, event);
-        } catch (const std::exception& error) {
-            report(QString::fromUtf8(error.what()));
-        } catch (...) {
-            report("an unknown error");
-        }
-        return false;
-    }
-
-private:
-    void report(const QString& message) {
-        const QString log = QDir(data_folder()).filePath("errors.log");
-        QDir().mkpath(data_folder());
-        std::ofstream(utf8_path(log.toStdString()), std::ios::app)
-            << QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm:ss").toStdString() << "\n"
-            << message.toStdString() << "\n\n";
-        if (window_) {
-            window_->log("Unexpected error: " + message);
-        }
-        if (showing_) {  // an error while the box is open: log it only
-            return;
-        }
-        showing_ = true;
-        QMessageBox::critical(window_, "Unexpected error",
-                              "Something went wrong; the details are in " + QDir::toNativeSeparators(log) +
-                                  ".\n\n" + message);
-        showing_ = false;
-    }
-
-    QPointer<Workbench> window_;
-    bool showing_ = false;
-};
 
 int check_installation(const QString& report) {
     const std::unique_ptr<QSettings> settings(make_settings(nullptr));

@@ -218,6 +218,11 @@ double seconds_of(std::int64_t ticks, const Rational& time_base) {
 
 }  // namespace
 
+void check_writable(const VideoInfo& encoded) {
+    const Demuxer demuxer(encoded.path, encoded.stream_index);
+    vvc::length_size_from_vvcc(demuxer.extradata());
+}
+
 WriteReport write_afgs1_mkv(const Tools& tools, const VideoInfo& encoded, const std::filesystem::path& output,
                             const GrainPlan& plan, int base_seed, const Progress& progress, CancelToken* cancel) {
     std::string extension = utf8(output.extension());

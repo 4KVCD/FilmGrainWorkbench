@@ -160,6 +160,7 @@ private:
     std::int64_t current_index_ = 0;
     // Source frames kept for stepping back and forth (~18 MB each at 4K), newest last.
     struct CachedFrame {
+        std::string path;  // the source's
         std::int64_t index;
         std::optional<Crop> crop;
         std::shared_ptr<const Frame> frame;

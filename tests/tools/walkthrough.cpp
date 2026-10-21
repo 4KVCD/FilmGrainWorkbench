@@ -4,6 +4,7 @@
 //
 //   fgw_walkthrough av1 SOURCE ENCODE [OUTPUT.mkv]   browse, retune; with OUTPUT also Write and Verify
 //   fgw_walkthrough vvc SOURCE [FRAME]               browse, encode a scene, show every view
+//   fgw_walkthrough error                            an error in a slot is reported, not fatal
 //
 // A small pair that writes in seconds (49 frames of noisy test pattern, the
 // encode with audio and subtitles), into tests\.cache:
@@ -19,7 +20,9 @@
 
 #include <QApplication>
 #include <QElapsedTimer>
+#include <QDir>
 #include <QEventLoop>
+#include <QFile>
 #include <QFileInfo>
 #include <QTemporaryDir>
 #include <QTimer>
@@ -27,6 +30,7 @@
 #include <windows.h>
 #include <psapi.h>
 
+#include "application.h"
 #include "av1_tab.h"
 #include "settings.h"
 #include "theme.h"
@@ -63,15 +67,16 @@ private:
     qint64 worst_ = 0;
 };
 
-// Times every event the window's thread handles, in the CPU time it took
-// that thread, and keeps the slowest one: what a stall was spent on.
-class TimedApplication : public QApplication {
+// The app's own Application (it reports errors), which also times every
+// event the window's thread handles, in the CPU time it took that thread,
+// and keeps the slowest one: what a stall was spent on.
+class TimedApplication : public Application {
 public:
-    using QApplication::QApplication;
+    using Application::Application;
 
     bool notify(QObject* receiver, QEvent* event) override {
         if (depth_++ > 0) {  // an event inside an event: its time counts for the outer one
-            const bool handled = QApplication::notify(receiver, event);
+            const bool handled = Application::notify(receiver, event);
             --depth_;
             return handled;
         }
@@ -79,7 +84,7 @@ public:
         const QString name = QString(receiver->metaObject()->className()) +
                              (receiver->objectName().isEmpty() ? QString() : "/" + receiver->objectName());
         const std::uint64_t start = thread_cycles();
-        const bool handled = QApplication::notify(receiver, event);
+        const bool handled = Application::notify(receiver, event);
         --depth_;
         if (const double ms = static_cast<double>(thread_cycles() - start) / cycles_per_ms_; ms > slowest_ms_) {
             slowest_ms_ = ms;
@@ -219,19 +224,36 @@ struct Walkthrough {
         report("luma strength 250 %", ok, tab.tune_label_->text().left(100));
 
         if (output.isEmpty()) {
+            leave_loading([&] { tab.go_to(tab.current_index_ / 2); tab.step(1); });
             return;
         }
         begin();
         tab.confirm_long_runs = false;
         tab.output_edit_->setText(output);
         tab.write();
-        ok = wait([&] { return !tab.busy() && tab.written_.has_value(); }, 3600);
-        report("Write (every frame)", ok, tab.write_label_->text().left(140));
+        ok = wait([&] { return !tab.busy(); }, 3600) && tab.written_.has_value();
+        report("Write (every frame)", ok,
+               (ok ? tab.write_label_->text() : tab.status_->label()->text()).left(160));
+        if (!ok) {
+            return;
+        }
 
         begin();
         ok = wait(idle) && (tab.verify(), wait([&] { return !tab.busy(); }, 300));
         ok = ok && tab.write_label_->text().contains("matches the preview exactly");
         report("Verify", ok, tab.write_label_->text().left(140));
+        leave_loading([&] { tab.go_to(tab.current_index_ / 2); tab.step(1); });
+    }
+
+    // Asks for frames, a second one queued behind the first, and returns
+    // without waiting: the window then closes while a frame loads (closing
+    // used to start the queued frame's job, then destroy it running).
+    void leave_loading(const std::function<void()>& ask) {
+        begin();
+        ask();
+        wait([] { return false; }, 0.05);  // the frame timer starts the first
+        ask();
+        report("asked for frames, closing while they load", true);
     }
 
     void vvc(const QString& source, std::int64_t frame) {
@@ -242,8 +264,13 @@ struct Walkthrough {
         begin();
         tab.source_edit_->setText(source);
         tab.load_source();
-        bool ok = wait([&] { return idle() && tab.state_->has(source_view); }, 300);
+        const auto shows_error = [&tab] { return tab.source_info_->styleSheet().contains("#ff7b72"); };
+        bool ok = wait([&] { return idle() && (tab.state_->has(source_view) || shows_error()); }, 300) &&
+                  tab.state_->has(source_view);
         report("open the source", ok, tab.source_info_->text().left(100));
+        if (!ok) {
+            return;
+        }
 
         begin();
         tab.go_to(frame >= 0 ? frame : tab.source_->frame_count() / 3);
@@ -276,14 +303,65 @@ struct Walkthrough {
         report("step 5 frames in the scene", ok, tab.caption(tab.current_index_));
         // The side panel's numbers: to compare runs before and after a change.
         std::printf("panel:\n%s\n", tab.info_label_->text().toUtf8().constData());
+        leave_loading([&] { tab.go_to(tab.current_index_ / 2); tab.step(1); });
+    }
+
+    // An exception from a slot goes to errors.log, the activity log and a
+    // message box (closed here as a user would), and the app carries on.
+    void error() {
+        window.show_tab(Workbench::av1_tab);
+        begin();
+        QTimer closer;  // the message box runs its own event loop: close it from there
+        bool box_shown = false;
+        QObject::connect(&closer, &QTimer::timeout, [&box_shown] {
+            if (QWidget* box = QApplication::activeModalWidget()) {
+                box_shown = true;
+                box->close();
+            }
+        });
+        closer.start(100);
+        QTimer::singleShot(0, [] { throw std::runtime_error("a bug in a slot"); });
+        const QString log_file = QDir(data_folder()).filePath("errors.log");
+        const auto logged = [&log_file] {
+            QFile file(log_file);
+            return file.open(QIODevice::ReadOnly) && file.readAll().contains("a bug in a slot");
+        };
+        bool ok = wait([&] { return box_shown && logged(); }, 10);
+        ok = ok && window.av1()->log_view_->toPlainText().contains("Unexpected error: a bug in a slot");
+        report("error in a slot: errors.log, log, message box", ok, log_file);
+        begin();
+        window.show_tab(Workbench::vvc_tab);
+        wait([] { return false; }, 0.3);
+        report("the app carries on", window.isVisible() && window.vvc()->isVisible());
     }
 };
 
 }  // namespace fgw::app
 
+namespace {
+
+const std::wstring tests_key = L"Software\\FilmGrainWorkbench-tests";
+
+// Deletes a profile's registry key, and the tests' key once no profile is left in it.
+void delete_settings_key(const QString& profile_name) {
+    RegDeleteTreeW(HKEY_CURRENT_USER, (tests_key + L"\\" + profile_name.toStdWString()).c_str());
+    RegDeleteKeyW(HKEY_CURRENT_USER, tests_key.c_str());  // fails, as it should, while it has subkeys
+}
+
+// The profiles of walkthroughs that were stopped before their end.
+void delete_old_profiles() {
+    for (const QFileInfo& folder : QDir(QDir::tempPath()).entryInfoList({"fgw-walkthrough-*"}, QDir::Dirs)) {
+        QDir(folder.filePath()).removeRecursively();
+        delete_settings_key(folder.fileName());
+    }
+}
+
+}  // namespace
+
 int main(int argc, char* argv[]) {
     using namespace fgw::app;
-    QTemporaryDir profile;
+    delete_old_profiles();
+    QTemporaryDir profile(QDir::tempPath() + "/fgw-walkthrough-XXXXXX");
     qputenv("FGW_PROFILE", profile.path().toLocal8Bit());
     if (qEnvironmentVariableIsEmpty("QT_QPA_PLATFORM")) {
         qputenv("QT_QPA_PLATFORM", "offscreen");  // nothing appears on the screen
@@ -294,30 +372,31 @@ int main(int argc, char* argv[]) {
     QApplication::setApplicationVersion(FGW_VERSION);
     apply_theme(app);
     const QStringList args = QApplication::arguments().mid(1);
-    if (args.size() < 2 || (args[0] == "av1" && args.size() < 3)) {
-        std::fprintf(stderr, "usage: fgw_walkthrough av1 SOURCE ENCODE [OUTPUT.mkv] | vvc SOURCE [FRAME]\n");
+    if (args.isEmpty() || (args[0] == "av1" && args.size() < 3) || (args[0] == "vvc" && args.size() < 2) ||
+        !QStringList{"av1", "vvc", "error"}.contains(args[0])) {
+        std::fprintf(stderr, "usage: fgw_walkthrough av1 SOURCE ENCODE [OUTPUT.mkv] | vvc SOURCE [FRAME] | error\n");
         return 2;
     }
     QSettings* settings = make_settings(&app);
     auto* window = new Workbench(settings);
     window->resize(1600, 1000);
     window->show();
+    app.set_window(window);
     Walkthrough walk{*window, app, {}, {}, 0};
     walk.wait([] { return false; }, 0.5);  // let the tabs start up
     if (args[0] == "av1") {
         walk.av1(args[1], args[2], args.value(3));
-    } else {
+    } else if (args[0] == "vvc") {
         walk.vvc(args[1], args.size() > 2 ? args[2].toLongLong() : -1);
+    } else {
+        walk.error();
     }
     walk.begin();
     window->close();
     delete window;
     walk.report("close", true);
 
-    // The profile's registry key, and the tests' key once no profile is left in it.
     delete settings;
-    const std::wstring tests = L"Software\\FilmGrainWorkbench-tests";
-    RegDeleteTreeW(HKEY_CURRENT_USER, (tests + L"\\" + QFileInfo(profile.path()).fileName().toStdWString()).c_str());
-    RegDeleteKeyW(HKEY_CURRENT_USER, tests.c_str());  // fails, as it should, while it has subkeys
+    delete_settings_key(QFileInfo(profile.path()).fileName());
     return walk.failures ? 1 : 0;
 }

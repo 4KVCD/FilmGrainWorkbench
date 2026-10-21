@@ -218,6 +218,9 @@ void VvcTab::install_shortcuts(QWidget* widget) {
 void VvcTab::reload_tools() {
     tools_ = load_tools(*settings_);
     update_tools_banner();
+    if (!source_ && !running(probe_job_) && !source_edit_->text().trimmed().isEmpty()) {
+        load_source();  // waiting for ffmpeg and ffprobe
+    }
 }
 
 void VvcTab::update_tools_banner() {
@@ -319,6 +322,14 @@ void VvcTab::load_source() {
     if (path.isEmpty()) {
         source_info_->clear();
         state_->clear("Choose a source video.");
+        return;
+    }
+    if (const std::vector<std::string> missing = tools_.missing({"ffmpeg", "ffprobe"}); !missing.empty()) {
+        // Else the probe runs an empty program path: "Program not found:  ([WinError 87] ...)".
+        probing_.clear();  // read once they are set up (reload_tools)
+        source_info_->setText("Set up ffmpeg and ffprobe first (Settings → External programs).");
+        source_info_->setStyleSheet("color: #ff7b72;");
+        state_->clear("ffmpeg and ffprobe are needed to show frames.");
         return;
     }
     source_info_->setStyleSheet("");
@@ -513,11 +524,14 @@ void VvcTab::remove_retired() {
 
 // Shows the current frame: the selected mode's encode inside the scene, the source otherwise.
 void VvcTab::show_frame() {
-    if (!source_) {
+    if (!source_ || !work_) {  // no work folder: shut down
         return;
     }
     if (crop_check_->isChecked() && !crop_known_) {
         // The whole picture meanwhile; the cropped one follows when the bars are known.
+        if (running(job_) && job_unwanted(job_key_)) {
+            job_->cancel();  // an earlier scene's encode would hold the detection up; its end shows this again
+        }
         start_black_bar_job();
         render_source(current_index_);
         return;
@@ -577,7 +591,7 @@ bool VvcTab::job_unwanted(const std::optional<JobKey>& key) const {
 }
 
 void VvcTab::start_job(const JobKey& key, const QString& name, Job::Work work, std::filesystem::path folder) {
-    if (running(job_)) {
+    if (running(job_) || !work_) {  // no work folder: shut down
         return;
     }
     job_key_ = key;
@@ -609,6 +623,11 @@ void VvcTab::start_black_bar_job() {
             }
             crop_ = crop;
             crop_known_ = true;
+            if (scene_ && !scene_->cut) {
+                // Encode this scene was pressed before the bars were known: its
+                // frames are not cut yet, so it is cut without them.
+                scene_->crop = wanted_crop();
+            }
             crop_label_->setText(crop ? QString("Picture area %1×%2 at (%3, %4)").arg(crop->width).arg(crop->height)
                                             .arg(crop->x).arg(crop->y)
                                       : QString("No black bars found."));
@@ -721,6 +740,9 @@ QString VvcTab::caption(std::int64_t index) const {
 }
 
 void VvcTab::start_frame_job(std::int64_t index, Job::Work work) {
+    if (!work_) {  // shut down
+        return;
+    }
     auto* job = new Job("Frame", std::move(work), this);
     connect(job, &Job::failed, this, [this, index](const QString& message) {
         state_->clear("Could not show frame " + qstring(with_thousands(index)) + ":\n\n" + message);
@@ -742,16 +764,17 @@ void VvcTab::render_source(std::int64_t index) {
     const Geometry g = geometry();
     const std::string ffmpeg = tools_.ffmpeg;
     const std::shared_ptr<const Converter> converter = converter_for(g);
+    const std::string path = utf8(source.path);
     std::shared_ptr<const Frame> cached;
     for (const CachedFrame& entry : source_frames_) {
-        if (entry.index == index && entry.crop == crop) {
+        if (entry.path == path && entry.index == index && entry.crop == crop) {
             cached = entry.frame;
         }
     }
     const bool backwards = index < last_read_;
     last_read_ = index;
     const std::int64_t first = backwards ? std::max<std::int64_t>(0, index - prefetch + 1) : index;
-    start_frame_job(index, [this, source, crop, g, ffmpeg, converter, cached, index, first](
+    start_frame_job(index, [this, source, path, crop, g, ffmpeg, converter, cached, index, first](
                                CancelToken& cancel, const Progress&) -> Job::Deliver {
         std::vector<std::shared_ptr<const Frame>> frames;
         if (cached) {
@@ -767,10 +790,15 @@ void VvcTab::render_source(std::int64_t index) {
                                      " could not be decoded (a cut file starts with pictures that need earlier frames)");
         }
         QImage image = to_qimage(*converter, **shown);
-        return [this, index, crop, frames = std::move(frames), image = std::move(image)] {
+        return [this, path, index, crop, frames = std::move(frames), image = std::move(image)] {
+            if (!source_ || utf8(source_->path) != path) {
+                return;  // another source was chosen meanwhile
+            }
             for (const auto& frame : frames) {
-                std::erase_if(source_frames_, [&](const CachedFrame& e) { return e.index == frame->index && e.crop == crop; });
-                source_frames_.push_back({frame->index, crop, frame});
+                std::erase_if(source_frames_, [&](const CachedFrame& e) {
+                    return e.path == path && e.index == frame->index && e.crop == crop;
+                });
+                source_frames_.push_back({path, frame->index, crop, frame});
             }
             while (source_frames_.size() > source_cache) {
                 release_later(std::move(source_frames_.front()));
@@ -832,7 +860,8 @@ void VvcTab::render_clip(std::shared_ptr<const Clip> clip, std::int64_t index) {
     }
     frame_pending_ = false;
     const std::shared_ptr<const Converter> converter = converter_for(clip->geometry);
-    start_frame_job(index, [this, clip, index, converter](CancelToken&, const Progress&) -> Job::Deliver {
+    const std::string path = utf8(source_->path);
+    start_frame_job(index, [this, clip, path, index, converter](CancelToken&, const Progress&) -> Job::Deliver {
         const Frame source = clip->frame(ClipPicture::source, index);
         const Frame decoded = clip->frame(ClipPicture::decoded, index);
         const Frame grained = clip->frame(ClipPicture::grained, index);
@@ -847,7 +876,10 @@ void VvcTab::render_clip(std::shared_ptr<const Clip> clip, std::int64_t index) {
                                          {grain_view, grained_image.get()},
                                          {grain_only_view, std::move(only)}};
         QString text = frame_text(*clip, index, stats);
-        return [this, index, images = std::move(images), text = std::move(text)] {
+        return [this, path, index, images = std::move(images), text = std::move(text)] {
+            if (!source_ || utf8(source_->path) != path) {
+                return;  // another source was chosen meanwhile
+            }
             if (index != current_index_) {
                 frame_pending_ = true;
                 return;
@@ -949,11 +981,10 @@ void VvcTab::shutdown() {
         return;  // done already
     }
     save();
+    frame_timer_.stop();  // each would start work
+    settings_timer_.stop();
     for (const QPointer<Job>& job : {job_, frame_job_, probe_job_}) {
-        if (running(job)) {
-            job->cancel();
-            job->wait(10000);
-        }
+        stop_for_good(job, 10000);
     }
     if (viewer_window_ != nullptr) {
         viewer_window_->close();

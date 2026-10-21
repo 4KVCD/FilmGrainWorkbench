@@ -32,6 +32,11 @@ struct WriteReport {
 
 PictureFormat picture_format(const VideoInfo& info);
 
+// Throws (with the reason) unless write_afgs1_mkv can read the encode's VVC
+// track: its packets need a vvcC record, which Matroska and MP4 carry and a
+// raw .266 or an MPEG-TS stream do not. Quick: call it before hours of analysis.
+void check_writable(const VideoInfo& encoded);
+
 // Throws std::invalid_argument (a bad output name), ToolError, Cancelled, or
 // std::runtime_error (the check of the written file failed).
 WriteReport write_afgs1_mkv(const Tools& tools, const VideoInfo& encoded, const std::filesystem::path& output,

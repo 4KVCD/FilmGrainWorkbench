@@ -3,6 +3,8 @@
 #include <exception>
 #include <utility>
 
+#include <QCoreApplication>
+
 #include "release.h"
 
 namespace fgw::app {
@@ -11,6 +13,15 @@ Job::Job(QString name, Work work, QObject* parent) : QThread(parent), name_(std:
     // QThread::finished comes from the job's thread; this receiver lives on
     // the window's, so the outcome is delivered there.
     connect(this, &QThread::finished, this, &Job::deliver_outcome);
+}
+
+Job::~Job() {
+    // Destroyed with its parent while it still runs (a job replaced by a
+    // newer one, at the app's exit): a running QThread must not be destroyed.
+    if (isRunning()) {
+        cancel();
+        wait();
+    }
 }
 
 void Job::run() {
@@ -33,6 +44,7 @@ void Job::run() {
 }
 
 void Job::deliver_outcome() {
+    delivered_ = true;  // what is done on delivery (start the next job) sees this one as done
     switch (outcome_) {
         case Outcome::succeeded:
             if (deliver_) {
@@ -50,6 +62,23 @@ void Job::deliver_outcome() {
     release_later(std::exchange(deliver_, nullptr));
     emit ended();
     deleteLater();
+}
+
+void stop_for_good(const QPointer<Job>& job, unsigned long wait_ms) {
+    if (!job || job->delivered_) {
+        return;
+    }
+    Job* const stopped = job.data();
+    stopped->cancel();
+    stopped->wait(wait_ms);
+    stopped->disconnect();                              // no delivery, no ended(): nothing more starts
+    QCoreApplication::removePostedEvents(stopped);  // a delivery already queued
+    stopped->delivered_ = true;
+    if (stopped->isRunning()) {
+        stopped->setParent(nullptr);  // left to the app's exit; destroying a running thread aborts
+    } else {
+        delete stopped;
+    }
 }
 
 }  // namespace fgw::app

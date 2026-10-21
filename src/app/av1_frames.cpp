@@ -78,8 +78,14 @@ bool Av1Tab::grain_possible(std::int64_t index) {
     return plan_->params_at(index).has_value() || (model_ == nullptr && source_frame_of(index) != nullptr);
 }
 
+// Whether these are still the videos shown: work started on others is not shown.
+bool Av1Tab::same_videos(const std::string& source_path, const std::string& encoded_path) const {
+    return encoded_ && utf8(encoded_->path) == encoded_path &&
+           (source_ ? utf8(source_->path) : std::string()) == source_path;
+}
+
 void Av1Tab::request_frame(std::int64_t index) {
-    if (!encoded_ || !tools_.missing({"ffmpeg"}).empty()) {
+    if (!encoded_ || !tools_.missing({"ffmpeg"}).empty() || shut_down_) {
         return;
     }
     if (running(frame_job_)) {
@@ -202,7 +208,7 @@ void Av1Tab::request_frame(std::int64_t index) {
                 frame_cache_.put({false, encoded_path, frame->index, {}}, frame);
             }
             frame_cache_.trim(cache_bytes);
-            if (index != current_index_) {
+            if (index != current_index_ || !same_videos(source_path, encoded_path)) {
                 return;
             }
             if (offset == offset_spin_->value() && loaded->match) {
@@ -227,9 +233,9 @@ void Av1Tab::request_frame(std::int64_t index) {
             update_enabled();
         };
     }, this);
-    connect(job, &Job::failed, this, [this, index](const QString& message) {
+    connect(job, &Job::failed, this, [this, index, source_path, encoded_path](const QString& message) {
         log(QString("Could not load frame %1: %2").arg(index).arg(message));
-        if (index == current_index_) {
+        if (index == current_index_ && same_videos(source_path, encoded_path)) {
             state_->clear("Could not decode frame " + thousands(index) + ".\n\n" + message.section('\n', 0, 0));
         }
     });
@@ -296,7 +302,7 @@ void Av1Tab::frame_job_ended() {
 // Synthesises the grain views of the current frame again (after a tuning
 // change, or as the second step of loading it).
 void Av1Tab::render_grain() {
-    if (!plan_ || !encoded_) {
+    if (!plan_ || !encoded_ || shut_down_) {
         return;
     }
     if (running(frame_job_)) {
@@ -321,7 +327,14 @@ void Av1Tab::render_grain() {
     const int seed = picture_seed(seed_spin_->value(), index);
     const bool subsampled_420 = encoded_->subsampling_x == 1 && encoded_->subsampling_y == 1;
     const std::shared_ptr<const Converter> converter = converter_;
-    const auto deliver = [this, index, offset](std::map<View, QImage> images, std::optional<GrainParams> estimate) {
+    const std::string source_path = source_ ? utf8(source_->path) : std::string();
+    const std::string encoded_path = utf8(encoded_->path);
+    const auto deliver = [this, index, offset, source_path, encoded_path](std::map<View, QImage> images,
+                                                                          std::optional<GrainParams> estimate) {
+        if (!same_videos(source_path, encoded_path)) {
+            held_.reset();  // made for other videos: an estimate of them, and pictures of their frame
+            return;
+        }
         if (estimate && offset == offset_spin_->value() && model_ == nullptr) {
             estimates_[index] = *estimate;
             if (frame_plan_) {

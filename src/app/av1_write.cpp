@@ -167,6 +167,7 @@ void Av1Tab::write() {
     };
     start_job("Writing", [=, this](CancelToken& cancel, const Progress& progress) -> Job::Deliver {
         const KeepAwake awake;
+        check_writable(encoded);  // a raw .266 or a .ts would fail only after the analysis
         const QString first_step = analysed ? QString() : QString("Step 1 of 2 · ");
         const QString second_step = analysed ? QString() : QString("Step 2 of 2 · ");
         auto model = std::make_shared<const TimelineModel>(analyze_every_frame(

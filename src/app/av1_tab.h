@@ -165,6 +165,7 @@ private:
     void step(int delta);
     void go_to(std::int64_t index, bool force = false);
     QString caption(std::int64_t index) const;
+    bool same_videos(const std::string& source_path, const std::string& encoded_path) const;
     void request_frame(std::int64_t index);
     void show_match(std::int64_t index, const FrameMatch& match);
     std::shared_ptr<const Frame> source_frame_of(std::int64_t index);
@@ -216,6 +217,7 @@ private:
     std::optional<std::pair<std::int64_t, std::map<View, QImage>>> held_;
     bool output_is_auto_ = true;  // the output name follows the encode until one is chosen
     bool shut_down_ = false;
+    bool autoload_again_ = false;  // look for a saved analysis again once the one loading ends
 
     PreviewState* state_;
     FramePane* pane_ = nullptr;
@@ -226,6 +228,7 @@ private:
     QTimer offset_timer_;
 
     QLabel* tools_banner_ = nullptr;
+    std::vector<QPushButton*> browse_buttons_;  // the videos' Browse…
     QLineEdit* source_edit_ = nullptr;
     QLineEdit* encoded_edit_ = nullptr;
     QLabel* source_info_ = nullptr;

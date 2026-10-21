@@ -18,6 +18,18 @@
 namespace fgw::test {
 namespace {
 
+// A program that fails reports its exit code: mkvmerge's 1 (warnings, a
+// complete file) must not fail Write. It was lost, so Write always failed.
+TEST(RunTool, AFailureCarriesTheExitCode) {
+    try {
+        run_tool({"cmd.exe", "/c", "exit 1"});
+        FAIL() << "no error";
+    } catch (const ToolError& error) {
+        EXPECT_EQ(error.exit_code(), 1);
+        EXPECT_NE(std::string(error.what()).find("failed (exit code 1)"), std::string::npos) << error.what();
+    }
+}
+
 TEST(Rational, LimitsDenominatorsAsPython) {
     const json reference = load_reference("engine.json");
     ASSERT_FALSE(reference.at("fractions").empty());

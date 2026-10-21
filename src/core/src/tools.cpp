@@ -213,8 +213,7 @@ ToolOutput run_tool(const std::vector<std::string>& command, CancelToken* cancel
         throw Cancelled();
     }
     if (exit_code != 0) {
-        throw ToolError(program_name(command.front()) + " failed (exit code " + std::to_string(exit_code) +
-                        "):\n" + error_lines(output.error_log));
+        throw tool_failure(command.front(), exit_code, output.error_log);  // with the exit code: mkvmerge's 1 is a warning
     }
     return output;
 }

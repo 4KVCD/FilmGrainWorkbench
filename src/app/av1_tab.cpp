@@ -195,6 +195,7 @@ QGroupBox* Av1Tab::videos_group() {
     int row = 0;
     for (const auto& [title, edit, info, kind] : rows) {
         auto* browse = new QPushButton("Browse…");
+        browse_buttons_.push_back(browse);
         connect(browse, &QPushButton::clicked, this, [this, kind = kind] { browse_video(kind); });
         connect(edit, &QLineEdit::editingFinished, this, [this, kind = kind] { load_video(kind); });
         grid->addWidget(new QLabel(title), row * 2, 0);
@@ -444,6 +445,9 @@ void Av1Tab::update_tools_banner() {
 // ---------------------------------------------------------------- videos
 
 void Av1Tab::browse_video(Kind kind) {
+    if (busy()) {
+        return;  // a Write or Detect is for the videos chosen
+    }
     QLineEdit* edit = kind == Kind::source ? source_edit_ : encoded_edit_;
     const QString start = edit->text().isEmpty() ? settings_->value("files/last_dir").toString() : edit->text();
     const QString path = QFileDialog::getOpenFileName(
@@ -598,8 +602,13 @@ QString Av1Tab::pair_key() const {
 void Av1Tab::update_enabled() {
     const bool working = busy();
     const bool pair = source_ && encoded_;
+    // The videos and the offset stay as they are while a Write or a Detect
+    // runs: its result is for them.
     for (QWidget* widget : std::initializer_list<QWidget*>{source_edit_, encoded_edit_, offset_spin_, workers_spin_, gpu_check_}) {
         widget->setEnabled(!working);
+    }
+    for (QPushButton* browse : browse_buttons_) {
+        browse->setEnabled(!working);
     }
     detect_button_->setEnabled(pair && !working);
     const QString blocker = write_blocker();
@@ -630,7 +639,7 @@ QString Av1Tab::write_blocker() const {
 }
 
 void Av1Tab::start_job(const QString& name, Job::Work work, const QString& busy_text) {
-    if (busy()) {
+    if (busy() || shut_down_) {
         return;
     }
     auto* job = new Job(name, std::move(work), this);
@@ -712,7 +721,14 @@ void Av1Tab::offset_changed() {
     }
     detected_.clear();
     estimates_.clear();
+    if (model_) {
+        model_.reset();  // measured on the frames the old offset paired
+        clear_model_ui();
+    }
     rebuild_plan();
+    if (source_ && encoded_) {
+        autoload_model();  // one saved for this offset
+    }
     frame_cache_.drop_source_frames();
     update_estimate();
     go_to(current_index_, true);
@@ -787,34 +803,39 @@ void Av1Tab::clear_model_ui() {
 }
 
 // The saved every-frame analysis of this pair: reopening it restores the analysis.
+// Keyed like the analysis's own folder: the two files, the offset and the
+// crop, so an analysis is never shown for another pairing of the frames.
 QString Av1Tab::model_cache_file() const {
     if (!source_ || !encoded_) {
         return {};
     }
-    FileStamp stamp;
     try {
-        stamp = file_stamp(encoded_->path);
+        const std::string key = cache_key(*source_, *encoded_, offset_spin_->value(), crop_);
+        return QDir(data_dir_).filePath("models/" + qstring(key) + ".every-frame.json");
     } catch (const std::filesystem::filesystem_error&) {
-        return {};  // the encode is gone
+        return {};  // a video is gone
     }
-    const std::string key = utf8(source_->path) + "|" + utf8(encoded_->path) + "|" + std::to_string(stamp.size) + "|" +
-                            std::to_string(stamp.mtime);
-    return QDir(data_dir_).filePath("models/" + qstring(sha1_hex(key).substr(0, 16)) + ".every-frame.json");
 }
 
 // Loads this pair's saved every-frame analysis in the background: a whole
 // film is ~150,000 parameter sets. The window stays usable meanwhile,
 // showing the live per-frame estimates until it arrives.
 void Av1Tab::autoload_model() {
+    if (running(model_job_)) {
+        autoload_again_ = true;  // when that one ends: its result is for other videos or another offset
+        return;
+    }
     const QString candidate = model_cache_file();
     if (candidate.isEmpty() || !QFileInfo(candidate).isFile()) {
         return;
     }
     const std::pair<std::string, std::string> pair = {utf8(source_->path), utf8(encoded_->path)};
+    const int offset = offset_spin_->value();
     analysis_label_->setText("Loading the saved every-frame analysis of these files…");
     analysis_label_->show();
-    const auto still_here = [this, pair] {
-        return source_ && encoded_ && std::pair{utf8(source_->path), utf8(encoded_->path)} == pair && model_ == nullptr;
+    const auto still_here = [this, pair, offset] {
+        return source_ && encoded_ && std::pair{utf8(source_->path), utf8(encoded_->path)} == pair &&
+               offset_spin_->value() == offset && model_ == nullptr;
     };
     auto* job = new Job("Loading the saved analysis", [this, candidate, still_here](CancelToken&, const Progress&) -> Job::Deliver {
         std::ifstream file(utf8_path(candidate.toStdString()), std::ios::binary);
@@ -836,6 +857,11 @@ void Av1Tab::autoload_model() {
         if (still_here()) {
             log("The saved analysis could not be read: " + message);
             analysis_label_->hide();
+        }
+    });
+    connect(job, &Job::ended, this, [this] {
+        if (std::exchange(autoload_again_, false) && source_ && encoded_) {
+            autoload_model();
         }
     });
     model_job_ = job;
@@ -1013,16 +1039,14 @@ void Av1Tab::shutdown() {
         return;
     }
     shut_down_ = true;
-    for (const auto& [job, seconds] : {std::pair{job_, 10}, std::pair{frame_job_, 5}, std::pair{source_probe_, 5},
-                                       std::pair{encoded_probe_, 5}}) {
-        if (running(job)) {
-            job->cancel();
-            job->wait(static_cast<unsigned long>(seconds) * 1000);
-        }
+    for (QTimer* timer : {&frame_timer_, &tune_timer_, &offset_timer_}) {
+        timer->stop();  // each would start work
     }
-    if (running(model_job_)) {
-        model_job_->wait(15000);  // reading a saved analysis cannot be interrupted
-    }
+    stop_for_good(job_, 10000);
+    stop_for_good(frame_job_, 5000);
+    stop_for_good(source_probe_, 5000);
+    stop_for_good(encoded_probe_, 5000);
+    stop_for_good(model_job_, 15000);  // reading a saved analysis cannot be interrupted
     if (viewer_window_ != nullptr) {
         settings_->setValue("av1/viewer_geometry", viewer_window_->saveGeometry());
         viewer_window_->close();
