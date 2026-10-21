@@ -6,10 +6,10 @@ modes: the selected one first, shown as soon as it is ready, the other two in
 the background, so switching modes is instant. Inside that scene every view is
 available, and a changed VVenC setting encodes the scene again.
 
-Temporary files: a window keeps one scene (its source frames and the three
+Temporary files: a tab keeps one scene (its source frames and the three
 encodes, each decoded twice) in its own folder in %TEMP%, deletes whatever is
 replaced as soon as nothing reads it, and the folder when it closes. Folders
-left by a crash are deleted when the next window opens.
+left by a crash are deleted when the next one opens.
 """
 
 from __future__ import annotations
@@ -21,12 +21,10 @@ from pathlib import Path
 import os
 import shutil
 
-import numpy as np
 from PySide6.QtCore import QSettings, Qt, QTimer
 from PySide6.QtGui import QFont, QImage, QKeySequence, QShortcut
-from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout,
-                               QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMainWindow,
-                               QProgressBar, QPushButton, QScrollArea, QSizePolicy, QSlider, QSpinBox,
+from PySide6.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout, QGridLayout,
+                               QGroupBox, QLabel, QLineEdit, QMainWindow, QPushButton, QScrollArea, QSpinBox,
                                QSplitter, QVBoxLayout, QWidget)
 
 from .. import display
@@ -34,10 +32,11 @@ from ..frames import Crop, Frame, Geometry, read_frames
 from ..probe import VideoInfo, probe
 from ..tools import Tools, ToolError, detect_tools
 from ..vvcgrain import (DECODED, FGA_MODES, GRAIN as GRAIN_FILE, PRESETS, SOURCE as SOURCE_FILE, Clip,
-                        SceneCut, VvcSettings, cut_scene, detect_black_bars, encode_scene, find_vvc_tools,
-                        frame_stats, open_work_dir)
+                        FrameStats, SceneCut, VvcSettings, cut_scene, detect_black_bars, encode_scene,
+                        find_vvc_tools, frame_stats, open_work_dir)
+from .frame_pane import SHORTCUT_HELP, FramePane, StatusBar, install_viewer_shortcuts, timecode, to_qimage
 from .jobs import Job, running
-from .viewer import ENCODED, GRAIN, GRAIN_ONLY, SOURCE, FrameView, PreviewState, ViewerWindow
+from .viewer import ENCODED, GRAIN, GRAIN_ONLY, SOURCE, PreviewState, ViewerWindow
 
 VIEW_NAMES = {SOURCE: "Source", ENCODED: "VVC, grain removed", GRAIN: "VVC + grain synthesis",
               GRAIN_ONLY: "Grain only (×4)"}
@@ -50,6 +49,17 @@ VIEW_TIPS = {SOURCE: "The source frame (cropped like the encode).",
 VIDEO_FILTER = "Video files (*.mkv *.mp4 *.mov *.webm *.ts *.m2ts *.y4m);;All files (*)"
 PREFETCH = 4                    # source frames decoded per seek while browsing
 SOURCE_CACHE = 16               # source frames kept for stepping back and forth (~18 MB each at 4K)
+FRAME_DELAY_MS = 120            # a frame is shown once stepping pauses this long
+SETTINGS_DELAY_MS = 600         # spin boxes change step by step: encode after the last step
+
+
+@dataclass(frozen=True)
+class JobKey:
+    """What the tab's one background job does: find the black bars, cut a scene, or encode a mode."""
+    kind: str                                      # "crop", "cut" or "encode"
+    scene: int = 0                                 # Scene.ident
+    coding: tuple = ()                             # VvcSettings.coding() of an encode
+    fga: int = 0                                   # the mode an encode is for
 
 
 @dataclass
@@ -69,24 +79,27 @@ class Scene:
         start, count = (self.cut.start, self.cut.count) if self.cut else (self.start, self.frames)
         return start <= index < start + count
 
-    def settings(self, fga: int) -> VvcSettings:
-        return VvcSettings(fga, *self.base, self.frames)
-
     def holds(self, index: int, frames: int, crop: Crop | None) -> bool:
         """Whether Encode this scene at ``index`` would cut these same frames again."""
         return self.covers(index) and (self.frames, self.crop) == (frames, crop)
 
+    def settings(self, fga: int) -> VvcSettings:
+        return VvcSettings(fga, *self.base, self.frames)
 
-def _qimage(rgb: np.ndarray) -> QImage:
-    rgb = np.ascontiguousarray(rgb)
-    h, w, _ = rgb.shape
-    return QImage(rgb.data, w, h, 3 * w, QImage.Format.Format_RGB888).copy()
+    def next_work(self, selected: int) -> JobKey | None:
+        """The cut first, then the selected mode, then the others in order; None when all are done."""
+        if self.cut is None:
+            return JobKey("cut", self.ident)
+        missing = [m for m in (selected, *sorted(FGA_MODES)) if m not in self.clips]
+        return JobKey("encode", self.ident, self.base, missing[0]) if missing else None
 
-
-def _timecode(seconds: float) -> str:
-    h, rem = divmod(seconds, 3600)
-    m, s = divmod(rem, 60)
-    return f"{int(h)}:{int(m):02d}:{s:06.3f}" if h else f"{int(m)}:{s:06.3f}"
+    def wants(self, key: JobKey) -> bool:
+        """Whether the result of the job ``key`` still belongs in this scene."""
+        if key.scene != self.ident:
+            return False
+        if key.kind == "cut":
+            return self.cut is None
+        return key.coding == self.base and key.fga not in self.clips
 
 
 class VvcGrainWindow(QMainWindow):
@@ -104,11 +117,11 @@ class VvcGrainWindow(QMainWindow):
         self.scene_count = 0
         self.stopped = False                        # Cancel pressed or an encode failed: no more work
         self.retired: list[Path] = []               # folders to delete once nothing reads them
+        self.job: Job | None = None                 # black-bar detection, a cut or an encode
+        self.job_key: JobKey | None = None
         self.job_folder: Path | None = None         # where the running job writes
         self.converter: display.Converter | None = None
         self.current_index = 0
-        self.job: Job | None = None                 # black-bar detection or an encode
-        self.job_key: tuple | None = None
         self.frame_job: Job | None = None
         self.frame_pending = False
         self.source_frames: OrderedDict[tuple[int, Crop | None], Frame] = OrderedDict()
@@ -116,11 +129,12 @@ class VvcGrainWindow(QMainWindow):
         self.preferred_mode = GRAIN                 # the view chosen last, restored inside a scene
         self.state = PreviewState(VIEW_NAMES)
         self.viewer_window: ViewerWindow | None = None
+        self.started = False                        # the controls are restored and may be saved
         self._build()
         self._restore()
-        self.frame_timer = QTimer(self, singleShot=True, interval=120)
+        self.frame_timer = QTimer(self, singleShot=True, interval=FRAME_DELAY_MS)
         self.frame_timer.timeout.connect(self._show)
-        self.settings_timer = QTimer(self, singleShot=True, interval=600)
+        self.settings_timer = QTimer(self, singleShot=True, interval=SETTINGS_DELAY_MS)
         self.settings_timer.timeout.connect(self._apply_settings)
         QTimer.singleShot(0, self._startup)
 
@@ -134,9 +148,39 @@ class VvcGrainWindow(QMainWindow):
         self.tools_banner.setWordWrap(True)
         self.tools_banner.setObjectName("warning")
         side.addWidget(self.tools_banner)
+        side.addWidget(self._source_group())
+        side.addWidget(self._vvenc_group())
+        side.addWidget(self._frame_group())
+        side.addStretch(1)
 
-        files = QGroupBox("1 · Source")
-        grid = QGridLayout(files)
+        scroll = QScrollArea()
+        scroll.setWidget(sidebar)
+        scroll.setWidgetResizable(True)
+        scroll.setMinimumWidth(440)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+
+        self.pane = FramePane(self.state, VIEW_TIPS, hint=SHORTCUT_HELP.format(left="VVC", right="VVC + grain"))
+        self.pane.frame_requested.connect(self._go_to)
+        self.pane.step_requested.connect(self._step)
+        self.pane.mode_requested.connect(self._set_mode)
+        self.pane.popout_requested.connect(self._open_viewer_window)
+        self.view = self.pane.view
+
+        self.splitter = QSplitter()
+        self.splitter.addWidget(scroll)
+        self.splitter.addWidget(self.pane)
+        self.splitter.setStretchFactor(1, 1)
+        self.splitter.setSizes([470, 1100])
+        self.setCentralWidget(self.splitter)
+        self.status = StatusBar(self, self._stop, progress_width=240)
+
+        self.state.changed.connect(self._sync_mode_buttons)
+        self._install_shortcuts(self)
+        self._update_tools()
+
+    def _source_group(self) -> QGroupBox:
+        box = QGroupBox("1 · Source")
+        grid = QGridLayout(box)
         self.source_edit = QLineEdit()
         self.source_edit.setPlaceholderText("Original, grainy video (e.g. the Blu-ray remux)")
         self.source_edit.editingFinished.connect(self._load_source)
@@ -157,10 +201,11 @@ class VvcGrainWindow(QMainWindow):
         grid.addWidget(self.source_info, 1, 0, 1, 2)
         grid.addWidget(self.crop_check, 2, 0, 1, 2)
         grid.addWidget(self.crop_label, 3, 0, 1, 2)
-        side.addWidget(files)
+        return box
 
-        enc = QGroupBox("2 · VVenC")
-        form = QFormLayout(enc)
+    def _vvenc_group(self) -> QGroupBox:
+        box = QGroupBox("2 · VVenC")
+        form = QFormLayout(box)
         self.fga_combo = QComboBox()
         for mode, text in FGA_MODES.items():
             self.fga_combo.addItem(text, mode)
@@ -173,8 +218,9 @@ class VvcGrainWindow(QMainWindow):
         self.preset_combo = QComboBox()
         self.preset_combo.addItems(PRESETS)
         self.frames_spin = QSpinBox(minimum=9, maximum=129, value=33)
-        self.frames_spin.setToolTip("Frames Encode this scene encodes, centred on the frame shown. VVenC analyses the grain once per "
-                                    "GOP (32 frames), so 33 covers one GOP and the next.")
+        self.frames_spin.setToolTip("Frames Encode this scene encodes, centred on the frame shown. VVenC "
+                                    "analyses the grain once per GOP (32 frames), so 33 covers one GOP and "
+                                    "the next.")
         for label, widget in (("Film grain analysis", self.fga_combo), ("Strength", self.strength_spin),
                               ("QP", self.qp_spin), ("Preset", self.preset_combo),
                               ("Scene length", self.frames_spin)):
@@ -197,122 +243,25 @@ class VvcGrainWindow(QMainWindow):
         self.tools_label.setObjectName("info")
         self.tools_label.setWordWrap(True)
         form.addRow(self.tools_label)
-        side.addWidget(enc)
+        return box
 
-        info = QGroupBox("3 · This frame")
-        il = QVBoxLayout(info)
+    def _frame_group(self) -> QGroupBox:
+        box = QGroupBox("3 · This frame")
+        column = QVBoxLayout(box)
         self.info_label = QLabel("Choose a source video.")
         self.info_label.setWordWrap(True)
         self.info_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         mono = QFont("Consolas")
         mono.setStyleHint(QFont.StyleHint.Monospace)
         self.info_label.setFont(mono)
-        il.addWidget(self.info_label)
-        side.addWidget(info)
-        side.addStretch(1)
+        column.addWidget(self.info_label)
+        return box
 
-        scroll = QScrollArea()
-        scroll.setWidget(sidebar)
-        scroll.setWidgetResizable(True)
-        scroll.setMinimumWidth(440)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-
-        right = QWidget()
-        rl = QVBoxLayout(right)
-        rl.setContentsMargins(0, 8, 8, 8)
-        bar = QHBoxLayout()
-        self.mode_group = QButtonGroup(self)
-        self.mode_buttons = {}
-        for mode, key in ((SOURCE, "1"), (ENCODED, "2"), (GRAIN, "3"), (GRAIN_ONLY, "4")):
-            button = QPushButton(f"{VIEW_NAMES[mode]}  [{key}]", checkable=True)
-            button.setToolTip(VIEW_TIPS[mode])
-            button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-            button.clicked.connect(lambda _=False, m=mode: self._set_mode(m))
-            self.mode_group.addButton(button)
-            self.mode_buttons[mode] = button
-            bar.addWidget(button)
-        bar.addStretch(1)
-        self.view = FrameView(self.state)
-        for text, action in (("Fit", self.view.fit), ("100%", lambda: self.view.set_zoom(1)),
-                             ("200%", lambda: self.view.set_zoom(2)), ("400%", lambda: self.view.set_zoom(4))):
-            b = QPushButton(text)
-            b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-            b.clicked.connect(action)
-            bar.addWidget(b)
-        popout = QPushButton("Open in window")
-        popout.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        popout.clicked.connect(self._open_viewer_window)
-        bar.addWidget(popout)
-        rl.addLayout(bar)
-        self.view.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        rl.addWidget(self.view, 1)
-        nav = QHBoxLayout()
-        prev_b, next_b = QPushButton("◀"), QPushButton("▶")
-        for b, d in ((prev_b, -1), (next_b, 1)):
-            b.setFixedWidth(34)
-            b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-            b.clicked.connect(lambda _=False, d=d: self._step(d))
-        self.timeline = QSlider(Qt.Orientation.Horizontal)
-        self.timeline.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.timeline.valueChanged.connect(lambda v: v != self.current_index and self._go_to(v))
-        self.frame_spin = QSpinBox(minimum=0, maximum=0)
-        self.frame_spin.setKeyboardTracking(False)
-        self.frame_spin.valueChanged.connect(self._go_to)
-        self.time_label = QLabel("0:00.000")
-        self.time_label.setMinimumWidth(90)
-        for w in (prev_b,):
-            nav.addWidget(w)
-        nav.addWidget(self.timeline, 1)
-        nav.addWidget(next_b)
-        nav.addWidget(QLabel("Frame"))
-        nav.addWidget(self.frame_spin)
-        nav.addWidget(self.time_label)
-        rl.addLayout(nav)
-        hint = QLabel("← → VVC / VVC + grain · 1–4 choose view · , . previous / next frame · PgUp PgDn ±1 s · "
-                      "wheel or + − zoom · 0 = 100 % · F fit · drag to pan")
-        hint.setObjectName("info")
-        rl.addWidget(hint)
-
-        self.splitter = QSplitter()
-        self.splitter.addWidget(scroll)
-        self.splitter.addWidget(right)
-        self.splitter.setStretchFactor(1, 1)
-        self.splitter.setSizes([470, 1100])
-        self.setCentralWidget(self.splitter)
-
-        status = self.statusBar()
-        self.status_label = QLabel("Ready.")
-        self.progress = QProgressBar(maximumWidth=240)
-        self.progress.setRange(0, 0)
-        self.progress.hide()
-        self.cancel_button = QPushButton("Cancel")
-        self.cancel_button.hide()
-        self.cancel_button.clicked.connect(self._stop)
-        status.addWidget(self.status_label, 1)
-        status.addPermanentWidget(self.progress)
-        status.addPermanentWidget(self.cancel_button)
-
-        self.state.changed.connect(self._sync_mode_buttons)
-        self._install_shortcuts(self, self.view)
-        self._update_tools()
-
-    def _install_shortcuts(self, window: QWidget, view: FrameView) -> None:
-        def add(key, fn):
-            QShortcut(QKeySequence(key), window, fn)
-        add(Qt.Key.Key_Left, lambda: self._set_mode(ENCODED))
-        add(Qt.Key.Key_Right, lambda: self._set_mode(GRAIN))
-        for key, mode in (("1", SOURCE), ("2", ENCODED), ("3", GRAIN), ("4", GRAIN_ONLY)):
-            add(key, lambda m=mode: self._set_mode(m))
-        add(",", lambda: self._step(-1))
-        add(".", lambda: self._step(1))
-        add(Qt.Key.Key_PageUp, lambda: self._step(-self._fps_frames()))
-        add(Qt.Key.Key_PageDown, lambda: self._step(self._fps_frames()))
-        add("+", lambda: view.step_zoom(1))
-        add("=", lambda: view.step_zoom(1))
-        add("-", lambda: view.step_zoom(-1))
-        add("0", lambda: view.set_zoom(1.0))
-        add("F", view.fit)
-        add("E", self._encode_scene)
+    def _install_shortcuts(self, widget: QWidget) -> None:
+        """The viewer's keys, and E for Encode this scene, on the tab or the frame window."""
+        view = self.viewer_window.view if widget is self.viewer_window else self.view
+        install_viewer_shortcuts(widget, view, self._set_mode, self._step, self._frames_per_second)
+        QShortcut(QKeySequence("E"), widget, self._encode_scene)
 
     # ------------------------------------------------------------------ settings
     def _load_tools(self) -> Tools:
@@ -323,12 +272,18 @@ class VvcGrainWindow(QMainWindow):
                 setattr(found, name, saved)
         return found
 
+    def reload_tools(self) -> None:
+        """ffmpeg and ffprobe as set up in Settings → External programs (shared with the AV1 tab)."""
+        self.tools = self._load_tools()
+        self._update_tools()
+
     def _update_tools(self) -> None:
         missing = self.tools.missing("ffmpeg", "ffprobe") + self.vvc_tools.missing()
         self.tools_banner.setVisible(bool(missing))
         self.tools_banner.setText("Missing: " + ", ".join(missing) + ". vvencapp and vvdecapp are built by "
                                   "vvc\\build_vvc_tools.ps1.")
-        self.tools_label.setText(f"vvencapp: {self.vvc_tools.vvencapp or '—'}\nvvdecapp: {self.vvc_tools.vvdecapp or '—'}")
+        self.tools_label.setText(f"vvencapp: {self.vvc_tools.vvencapp or '—'}\n"
+                                 f"vvdecapp: {self.vvc_tools.vvdecapp or '—'}")
 
     def _restore(self) -> None:
         s = self.settings
@@ -353,10 +308,11 @@ class VvcGrainWindow(QMainWindow):
         s.setValue("vvc/crop", self.crop_check.isChecked())
 
     def _vvc_settings(self) -> VvcSettings:
-        return VvcSettings(int(self.fga_combo.currentData()), self.strength_spin.value(),
-                           float(self.qp_spin.value()), self.preset_combo.currentText(), self.frames_spin.value())
+        return VvcSettings(self._selected_mode(), self.strength_spin.value(), float(self.qp_spin.value()),
+                           self.preset_combo.currentText(), self.frames_spin.value())
 
-    started = False
+    def _selected_mode(self) -> int:
+        return int(self.fga_combo.currentData())
 
     def _startup(self) -> None:
         self.started = True
@@ -396,13 +352,9 @@ class VvcGrainWindow(QMainWindow):
             return
         self.source_info.setStyleSheet("")
         self.source_info.setText(self.source.describe())
-        n = self.source.frame_count
-        for w in (self.timeline, self.frame_spin):
-            w.blockSignals(True)
-            w.setMaximum(n - 1)
-            w.blockSignals(False)
+        self.pane.set_frame_count(self.source.frame_count)
         self._save()
-        self._go_to(n // 3, force=True)
+        self._go_to(self.source.frame_count // 3, force=True)
 
     def _crop_toggled(self) -> None:
         self._save()
@@ -413,7 +365,7 @@ class VvcGrainWindow(QMainWindow):
             self._show()
 
     # ------------------------------------------------------------------ navigation
-    def _fps_frames(self) -> int:
+    def _frames_per_second(self) -> int:
         return int(round(float(self.source.fps))) if self.source else 24
 
     def _step(self, delta: int) -> None:
@@ -427,18 +379,14 @@ class VvcGrainWindow(QMainWindow):
         if index == self.current_index and not force:
             return
         self.current_index = index
-        for w in (self.timeline, self.frame_spin):
-            w.blockSignals(True)
-            w.setValue(index)
-            w.blockSignals(False)
-        self.time_label.setText(_timecode(index / float(self.source.fps)))
+        self.pane.show_frame(index, index / float(self.source.fps))
         self.frame_timer.start()
 
     def _settings_changed(self, *_) -> None:
         self._save()
         if self.source:
             self._update_scene_label()
-            self.settings_timer.start()             # spin boxes change step by step: wait for the last
+            self.settings_timer.start()
 
     def _mode_changed(self, *_) -> None:
         """Another analysis mode: shown at once when it is encoded, encoded next otherwise."""
@@ -458,21 +406,7 @@ class VvcGrainWindow(QMainWindow):
             self._recode(scene, self._vvc_settings().coding())
         self._show()
 
-    def _recode(self, scene: Scene, coding: tuple[int, float, str]) -> None:
-        """Encode the scene's modes again with other coding settings; the current ones stay
-        on screen (as ``older``) until each replacement is ready."""
-        if coding == scene.base:
-            return
-        self.stopped = False
-        for fga, clip in scene.clips.items():
-            old = scene.older.pop(fga, None)
-            if old:
-                self.retired.append(old.folder)
-            scene.older[fga] = clip
-        scene.clips, scene.base = {}, coding
-        self._remove_retired()
-
-    # ------------------------------------------------------------------ encoding
+    # ------------------------------------------------------------------ scenes
     def _wanted_crop(self) -> Crop | None:
         return self.crop if self.crop_check.isChecked() else None
 
@@ -507,6 +441,20 @@ class VvcGrainWindow(QMainWindow):
         self.preferred_mode = GRAIN
         self._show()
 
+    def _recode(self, scene: Scene, coding: tuple[int, float, str]) -> None:
+        """Encode the scene's modes again with other coding settings; the current ones stay
+        on screen (as ``older``) until each replacement is ready."""
+        if coding == scene.base:
+            return
+        self.stopped = False
+        for fga, clip in scene.clips.items():
+            old = scene.older.pop(fga, None)
+            if old:
+                self.retired.append(old.folder)
+            scene.older[fga] = clip
+        scene.clips, scene.base = {}, coding
+        self._remove_retired()
+
     def _retire_scene(self) -> None:
         if self.scene:
             self.retired.append(self.scene.folder)
@@ -526,19 +474,20 @@ class VvcGrainWindow(QMainWindow):
                 shutil.rmtree(folder, ignore_errors=True)
         self.retired = keep
 
+    # ------------------------------------------------------------------ what is shown, what runs
     def _show(self) -> None:
         """Show the current frame: the selected mode's encode inside the scene, the source otherwise."""
         if not self.source:
             return
         if self.crop_check.isChecked() and not self.crop_known:
             # The whole picture meanwhile; the cropped one follows when the bars are known.
-            self._start_job(("crop", str(self.source.path)), self._detect_bars())
+            self._start_job(JobKey("crop"), self._detect_bars())
             self._render_source(self.current_index)
             return
         self._schedule()
         index, scene = self.current_index, self.scene
         if scene and scene.covers(index):
-            fga = int(self.fga_combo.currentData())
+            fga = self._selected_mode()
             clip = scene.clips.get(fga) or scene.older.get(fga)
             if clip and clip.covers(index):
                 self._render(clip, index)
@@ -546,41 +495,34 @@ class VvcGrainWindow(QMainWindow):
         self._render_source(index)
 
     def _schedule(self) -> None:
-        """Start the scene's next piece of work: the cut, then the selected mode, then the other two."""
+        """Start the scene's next piece of work, or cancel a job whose result is no longer wanted."""
         if running(self.job):
-            if not self._job_wanted(self.job_key) or self._job_blocks_selected(self.job_key):
+            if self._job_unwanted(self.job_key):
                 self.job.cancel()                   # its finished signal schedules again
             return
         scene = self.scene
         if not scene or self.stopped:
             return
-        if scene.cut is None:
-            self._start_job(("cut", scene.ident), self._cut(scene))
+        key = scene.next_work(self._selected_mode())
+        if key is None:
             return
-        selected = int(self.fga_combo.currentData())
-        missing = [m for m in [selected, *sorted(FGA_MODES)] if m not in scene.clips]
-        if missing:
-            self._start_job(("encode", scene.ident, scene.base, missing[0]), self._encode(scene, missing[0]))
+        self._start_job(key, self._cut(scene) if key.kind == "cut" else self._encode(scene, key.fga))
 
-    def _job_blocks_selected(self, key: tuple | None) -> bool:
-        """A background encode of another mode, while the mode chosen in the list is still missing.
+    def _job_unwanted(self, key: JobKey | None) -> bool:
+        """The running job's result is not needed, or it holds up the mode chosen in the list.
 
-        Cancelling it shows the chosen mode a few seconds sooner; the cancelled
-        mode is encoded again afterwards.
+        A background encode of another mode is cancelled while the chosen mode
+        is missing: the chosen one shows a few seconds sooner, and the cancelled
+        one is encoded again afterwards.
         """
-        scene, selected = self.scene, int(self.fga_combo.currentData())
-        return bool(key and key[0] == "encode" and scene and key[1] == scene.ident
-                    and key[3] != selected and selected not in scene.clips and not self.stopped)
-
-    def _job_wanted(self, key: tuple | None) -> bool:
-        scene = self.scene
-        if not key or key[0] == "crop":
-            return True
-        if not scene or key[1] != scene.ident:
+        if key is None or key.kind == "crop":
             return False
-        if key[0] == "cut":
-            return scene.cut is None
-        return key[2] == scene.base and key[3] not in scene.clips
+        scene = self.scene
+        if scene is None or not scene.wants(key):
+            return True
+        selected = self._selected_mode()
+        return key.kind == "encode" and key.fga != selected and selected not in scene.clips \
+            and not self.stopped
 
     def _detect_bars(self):
         source, ffmpeg = self.source, self.tools.ffmpeg
@@ -623,31 +565,29 @@ class VvcGrainWindow(QMainWindow):
                 self.retired.append(old.folder)
             scene.clips[fga] = clip
             left = [m for m in FGA_MODES if m not in scene.clips]
-            self.status_label.setText(
+            self.status.label.setText(
                 f"--fga {fga} encoded in {clip.encode_seconds:.1f} s ({clip.kbps:,.0f} kb/s)"
                 + (f"; --fga {', '.join(map(str, left))} next, in the background." if left else
                    "; all three modes are ready."))
         return f"Encoding --fga {fga}", work, done, scene.folder
 
-    def _start_job(self, key: tuple, spec) -> None:
+    def _start_job(self, key: JobKey, spec) -> None:
         name, work, done, folder = spec
         if running(self.job):
             return
         self.job_key, self.job_folder = key, folder
         self.job = Job(name, work, self)
-        self.job.progress.connect(lambda f, m: self.status_label.setText(m))
+        self.job.progress.connect(lambda fraction, message: self.status.label.setText(message))
         self.job.succeeded.connect(done)
-        self.job.failed.connect(lambda msg, n=name, k=key: self._failed(n, k, msg))
+        self.job.failed.connect(lambda message, n=name, k=key: self._failed(n, k, message))
         self.job.cancelled.connect(self._job_cancelled)
         self.job.finished.connect(self._job_finished)
-        self.progress.show()
-        self.cancel_button.show()
+        self.status.busy()
         self._update_scene_label()
         self.job.start()
 
     def _job_finished(self) -> None:
-        self.progress.hide()
-        self.cancel_button.hide()
+        self.status.idle()
         self.job_key = self.job_folder = None
         self._remove_retired()
         self._update_scene_label()
@@ -655,11 +595,11 @@ class VvcGrainWindow(QMainWindow):
 
     def _job_cancelled(self) -> None:
         if self.stopped:                            # Cancel pressed; other cancels are rescheduling
-            self.status_label.setText("Cancelled.")
+            self.status.label.setText("Cancelled.")
 
-    def _failed(self, name: str, key: tuple, message: str) -> None:
-        self.status_label.setText(f"{name} failed.")
-        if key[0] == "crop":
+    def _failed(self, name: str, key: JobKey, message: str) -> None:
+        self.status.label.setText(f"{name} failed.")
+        if key.kind == "crop":
             self.crop_known = True                  # show the whole picture rather than try again
             self.crop_label.setText("Black bar detection failed: " + message.splitlines()[0])
             return
@@ -686,6 +626,17 @@ class VvcGrainWindow(QMainWindow):
                 g.bit_depth, src.limited_range, src.matrix, src.transfer, src.primaries, g.width, g.height))
         return self.converter
 
+    def _caption(self, index: int) -> str:
+        return f"frame {index:,} · {timecode(index / float(self.source.fps))}"
+
+    def _start_frame_job(self, index: int, work, on_ready) -> None:
+        job = Job("Frame", work, self)
+        job.succeeded.connect(on_ready)
+        job.failed.connect(lambda message: self.state.clear(f"Could not show frame {index:,}:\n\n{message}"))
+        job.finished.connect(self._frame_job_finished)
+        self.frame_job = job
+        job.start()
+
     def _render_source(self, index: int) -> None:
         """Show the source frame alone (no encode): browsing for a scene."""
         if running(self.frame_job):
@@ -705,14 +656,9 @@ class VvcGrainWindow(QMainWindow):
             if frame is None:
                 raise RuntimeError(f"frame {index:,} could not be decoded (a cut file starts with pictures "
                                    "that need earlier frames)")
-            return index, frames, _qimage(converter.to_rgb(frame.y, frame.u, frame.v))
+            return index, frames, to_qimage(converter.to_rgb(frame.y, frame.u, frame.v))
 
-        job = Job("Frame", work, self)
-        job.succeeded.connect(lambda result, c=crop: self._source_ready(*result, c))
-        job.failed.connect(lambda msg: self.state.clear(f"Could not show frame {index:,}:\n\n{msg}"))
-        job.finished.connect(self._frame_job_finished)
-        self.frame_job = job
-        job.start()
+        self._start_frame_job(index, work, lambda result, c=crop: self._source_ready(*result, c))
 
     def _source_ready(self, index: int, frames: list[Frame], image: QImage, crop: Crop | None) -> None:
         for f in frames:
@@ -723,17 +669,73 @@ class VvcGrainWindow(QMainWindow):
         if index != self.current_index:
             self.frame_pending = True
             return
-        self.state.set_images({SOURCE: image}, f"frame {index:,} · {_timecode(index / float(self.source.fps))}")
+        self.state.set_images({SOURCE: image}, self._caption(index))
         scene = self.scene
         if scene and scene.covers(index) and not self.stopped:
-            text = f"Encoding --fga {int(self.fga_combo.currentData())} for this scene…"
+            text = f"Encoding --fga {self._selected_mode()} for this scene…"
         else:
             text = ("Source frame. Press Encode this scene (E) to encode the frames around it with VVenC "
                     "and see them without and with the grain synthesis.")
         self.info_label.setText(text)
         if not running(self.job):
-            self.status_label.setText(f"Frame {index:,}.")
+            self.status.label.setText(f"Frame {index:,}.")
         self._update_scene_label()
+
+    def _render(self, clip: Clip, index: int) -> None:
+        """Show the frame from an encoded scene: source, decoded, decoded + grain, grain only."""
+        if running(self.frame_job):
+            self.frame_pending = True
+            return
+        self.frame_pending = False
+        g = clip.geometry
+        converter = self._converter(g)
+
+        def work(token, progress):
+            s, d, gr = (clip.frame(which, index) for which in (SOURCE_FILE, DECODED, GRAIN_FILE))
+            with ThreadPoolExecutor(3) as pool:
+                jobs = {view: pool.submit(lambda f=f: to_qimage(converter.to_rgb(f.y, f.u, f.v)))
+                        for view, f in ((SOURCE, s), (ENCODED, d), (GRAIN, gr))}
+                only = to_qimage(display.grain_only(d.y, gr.y, g.bit_depth))
+                stats = frame_stats(s, d, gr)
+                images = {view: job.result() for view, job in jobs.items()}
+            images[GRAIN_ONLY] = only
+            return index, images, stats
+
+        self._start_frame_job(index, work, lambda result, c=clip: self._frame_ready(c, *result))
+
+    def _frame_job_finished(self) -> None:
+        self._remove_retired()
+        if self.frame_pending:
+            self._show()
+
+    def _frame_ready(self, clip: Clip, index: int, images: dict, stats: FrameStats) -> None:
+        if index != self.current_index:
+            self.frame_pending = True
+            return
+        self.state.set_images(images, self._caption(index))
+        self.state.set_mode(self.preferred_mode)
+        self._update_scene_label()
+        self.info_label.setText(self._frame_text(clip, index, stats))
+        if not running(self.job):
+            self.status.label.setText(f"Frame {index:,}.")
+
+    @staticmethod
+    def _frame_text(clip: Clip, index: int, stats: FrameStats) -> str:
+        grain = clip.grain_at(index)
+        signalled = grain.describe() if grain else "no film grain parameters"
+        n_sets = len({g.describe() for g in clip.grain if g})
+        y, cb, cr = stats.removed
+        ay, acb, acr = stats.added
+        sy, scb, scr = stats.shift
+        s = clip.settings
+        return (f"Signalled (FGC SEI) for this frame:\n{signalled}\n\n"
+                f"Measured on this frame, 8-bit units:\n"
+                f"  removed by VVenC  σ  Y {y:5.2f}  Cb {cb:5.2f}  Cr {cr:5.2f}\n"
+                f"  added by vvdec    σ  Y {ay:5.2f}  Cb {acb:5.2f}  Cr {acr:5.2f}\n"
+                f"  colour shift      mean Y {sy:+.3f}  Cb {scb:+.3f}  Cr {scr:+.3f}\n\n"
+                f"Scene: frames {clip.start:,}–{clip.start + clip.count - 1:,}, {n_sets} parameter "
+                f"set{'s' if n_sets != 1 else ''}; --fga {s.fga}, {s.strength} %, QP {s.qp:g}, {s.preset}; "
+                f"{clip.kbps:,.0f} kb/s, encoded in {clip.encode_seconds:.1f} s.")
 
     def _update_scene_label(self) -> None:
         if not self.source:
@@ -748,16 +750,16 @@ class VvcGrainWindow(QMainWindow):
             def status(m: int) -> str:
                 if m in scene.clips:
                     return "ready"
-                if key and key[0] == "encode" and key[1] == scene.ident and key[3] == m:
+                if key and key.kind == "encode" and key.scene == scene.ident and key.fga == m:
                     return "encoding"
                 return "stopped" if self.stopped else "waiting"
             modes = " · ".join(f"--fga {m} {status(m)}" for m in sorted(FGA_MODES))
-            where = "This scene" if scene.covers(self.current_index) else "Encoded scene"
-            text = f"{where}: frames {first:,}–{first + count - 1:,}. {modes}."
-            if scene.covers(self.current_index):
+            here = scene.covers(self.current_index)
+            text = f"{'This scene' if here else 'Encoded scene'}: frames {first:,}–{first + count - 1:,}. {modes}."
+            if here:
                 if scene.base != self._vvc_settings().coding():
                     text += " Encoded with other settings than these: press Encode this scene to use them."
-                elif scene.older and int(self.fga_combo.currentData()) not in scene.clips:
+                elif scene.older and self._selected_mode() not in scene.clips:
                     text += " Shown with the earlier settings until the new encode is ready."
                 if self.frames_spin.value() != scene.frames:
                     text += (f" The new scene length ({self.frames_spin.value()}) applies when Encode this "
@@ -766,85 +768,24 @@ class VvcGrainWindow(QMainWindow):
                 text += f" Encode this scene would encode frames {start:,}–{start + length - 1:,}."
         self.scene_label.setText(text)
 
-    def _render(self, clip: Clip, index: int) -> None:
-        if running(self.frame_job):
-            self.frame_pending = True
-            return
-        self.frame_pending = False
-        g = clip.geometry
-        converter = self._converter(g)
-
-        def work(token, progress):
-            frames = {which: clip.frame(which, index) for which in (SOURCE_FILE, DECODED, GRAIN_FILE)}
-            s, d, gr = frames[SOURCE_FILE], frames[DECODED], frames[GRAIN_FILE]
-            with ThreadPoolExecutor(3) as pool:
-                jobs = {SOURCE: pool.submit(lambda: _qimage(converter.to_rgb(s.y, s.u, s.v))),
-                        ENCODED: pool.submit(lambda: _qimage(converter.to_rgb(d.y, d.u, d.v))),
-                        GRAIN: pool.submit(lambda: _qimage(converter.to_rgb(gr.y, gr.u, gr.v)))}
-                only = _qimage(display.grain_only(d.y, gr.y, g.bit_depth))
-                stats = frame_stats(s, d, gr)
-                images = {k: j.result() for k, j in jobs.items()}
-            images[GRAIN_ONLY] = only
-            return index, images, stats
-
-        job = Job("Frame", work, self)
-        job.succeeded.connect(lambda result, c=clip: self._frame_ready(c, *result))
-        job.failed.connect(lambda msg: self.state.clear(f"Could not show frame {index:,}:\n\n{msg}"))
-        job.finished.connect(self._frame_job_finished)
-        self.frame_job = job
-        job.start()
-
-    def _frame_job_finished(self) -> None:
-        self._remove_retired()
-        if self.frame_pending:
-            self._show()
-
-    def _frame_ready(self, clip: Clip, index: int, images: dict, stats) -> None:
-        if index != self.current_index:
-            self.frame_pending = True
-            return
-        caption = f"frame {index:,} · {_timecode(index / float(self.source.fps))}"
-        self.state.set_images(images, caption)
-        self.state.set_mode(self.preferred_mode)
-        self._update_scene_label()
-        grain = clip.grain_at(index)
-        signalled = grain.describe() if grain else "no film grain parameters"
-        n_sets = len({g.describe() for g in clip.grain if g})
-        y, cb, cr = stats.removed
-        ay, acb, acr = stats.added
-        sy, scb, scr = stats.shift
-        s = clip.settings
-        self.info_label.setText(
-            f"Signalled (FGC SEI) for this frame:\n{signalled}\n\n"
-            f"Measured on this frame, 8-bit units:\n"
-            f"  removed by VVenC  σ  Y {y:5.2f}  Cb {cb:5.2f}  Cr {cr:5.2f}\n"
-            f"  added by vvdec    σ  Y {ay:5.2f}  Cb {acb:5.2f}  Cr {acr:5.2f}\n"
-            f"  colour shift      mean Y {sy:+.3f}  Cb {scb:+.3f}  Cr {scr:+.3f}\n\n"
-            f"Scene: frames {clip.start:,}–{clip.start + clip.count - 1:,}, {n_sets} parameter "
-            f"set{'s' if n_sets != 1 else ''}; --fga {s.fga}, {s.strength} %, QP {s.qp:g}, {s.preset}; "
-            f"{clip.kbps:,.0f} kb/s, encoded in {clip.encode_seconds:.1f} s.")
-        if not running(self.job):
-            self.status_label.setText(f"Frame {index:,}.")
-
     # ------------------------------------------------------------------ view modes
     def _set_mode(self, mode: int) -> None:
         if self.state.set_mode(mode):
             self.preferred_mode = mode
         elif mode != SOURCE and self.source:
-            self.status_label.setText("Press Encode this scene (E) to see the VVC views of this frame.")
+            self.status.label.setText("Press Encode this scene (E) to see the VVC views of this frame.")
         self._sync_mode_buttons()
 
     def _sync_mode_buttons(self) -> None:
-        for mode, button in self.mode_buttons.items():
-            button.setEnabled(mode in self.state.images)
-            button.setChecked(mode == self.state.mode and bool(self.state.images))
+        self.pane.sync_modes(set(self.state.images))
 
     def _open_viewer_window(self) -> None:
         if self.viewer_window is None:
             self.viewer_window = ViewerWindow(self.state)
-            self._install_shortcuts(self.viewer_window, self.viewer_window.view)
+            self._install_shortcuts(self.viewer_window)
         self.viewer_window.show_sized()
 
+    # ------------------------------------------------------------------ closing
     def can_close(self) -> bool:
         """Nothing here needs asking: a scene is quick to encode again."""
         return True

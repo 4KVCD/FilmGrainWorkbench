@@ -83,6 +83,7 @@ class Converter:
             self._gamut = _BT2020_TO_709 if fmt.primaries.startswith("bt2020") else None
 
     BANDS = 8                       # a 4K frame converts ~2x faster in row bands on threads
+    BAND_MIN_SAMPLES = 1 << 20      # smaller frames convert in one piece (threads cost more)
 
     def to_rgb(self, y: np.ndarray, u: np.ndarray, v: np.ndarray) -> np.ndarray:
         """Return an (H, W, 3) uint8 array.
@@ -95,7 +96,7 @@ class Converter:
         # at an odd last row).
         sy = int(round(y.shape[0] / u.shape[0]))
         sx = int(round(y.shape[1] / u.shape[1]))
-        if y.size < 1 << 20:
+        if y.size < self.BAND_MIN_SAMPLES:
             return self._convert(y, u, v, sy, sx)
         rows = -(-y.shape[0] // self.BANDS)
         rows += (-rows) % sy                       # bands start on a chroma row

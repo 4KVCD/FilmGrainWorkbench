@@ -152,7 +152,7 @@ def test_errors_in_the_gui_thread_are_reported(qapp, tmp_path, monkeypatch):
     wait_for(qapp, lambda: shown, timeout=10)
     assert "a bug in a slot" in shown[0]
     assert "a bug in a slot" in (tmp_path / "data" / "errors.log").read_text(encoding="utf-8")
-    assert "Unexpected error" in w.log.toPlainText()
+    assert "Unexpected error" in w.log_view.toPlainText()
     w.close()
 
 

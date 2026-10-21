@@ -23,11 +23,13 @@ import re
 import shutil
 import tempfile
 import time
+from typing import TextIO
 
 import numpy as np
 
 from .bits import BitReader
-from .frames import _PTS_TIME, Crop, Frame, Geometry, _command, frame_index, seek_args, split_planes
+from .frames import (PTS_TIME, Crop, Frame, Geometry, ffmpeg_command, frame_index, seek_args,
+                     split_planes)
 from .probe import VideoInfo
 from .tools import CancelToken, ToolError, run, run_with_log
 from .vvc import NAL_PREFIX_SEI, parse_sei_messages, unescape_rbsp
@@ -203,7 +205,7 @@ def _in_use(folder: Path) -> bool:
     return True
 
 
-def open_work_dir(parent: Path | None = None):
+def open_work_dir(parent: Path | None = None) -> tuple[Path, TextIO]:
     """A new folder for a window's scenes, and its lock file, kept open while the window lives.
 
     Folders left by earlier runs that ended without cleaning up (a crash, a
@@ -424,12 +426,12 @@ def cut_scene(ffmpeg: str, info: VideoInfo, start: int, frames: int, crop: Crop 
     folder.mkdir(parents=True, exist_ok=True)
     source = folder / _FILES[SOURCE]
     progress(-1, f"Reading source frames {start:,}–{start + frames - 1:,}…")
-    _, log = run_with_log(_command(ffmpeg, info, start, frames, geometry, crop, str(source),
-                                   with_times=True), cancel)
+    _, log = run_with_log(ffmpeg_command(ffmpeg, info, start, frames, geometry, crop, str(source),
+                                         with_times=True), cancel)
     count = source.stat().st_size // geometry.frame_bytes if source.exists() else 0
     if count == 0:
         raise RuntimeError(f"{info.path.name}: frame {start} could not be decoded")
-    times = [float(t) for t in _PTS_TIME.findall(log)]
+    times = [float(t) for t in PTS_TIME.findall(log)]
     first = frame_index(info, times[0]) if times else start   # a cut file may start later
     return SceneCut(first, count, geometry, crop, info.fps, folder, vvenc_hdr_mode(info))
 

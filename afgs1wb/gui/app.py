@@ -60,7 +60,7 @@ def install_error_handler(window) -> None:
         except OSError:
             pass
         try:
-            window._log("Unexpected error: " + text.strip().splitlines()[-1])
+            window.log("Unexpected error: " + text.strip().splitlines()[-1])
         except Exception:
             pass
         if showing:                       # an error while the box is open: log it only

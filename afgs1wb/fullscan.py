@@ -34,7 +34,7 @@ import numpy as np
 
 from . import synth
 from .alignment import check_alignment
-from .frames import Crop, Frame, Geometry, _filters, read_frames, seek_args
+from .frames import Crop, Frame, Geometry, filter_chain, read_frames, seek_args
 from .grain_params import GrainParams, TableEntry, bulk_objects, format_grain_table, parse_grain_table
 from .probe import VideoInfo
 from .tools import Cancelled, CancelToken, ToolError, Tools, cpu_count, run
@@ -43,6 +43,8 @@ CHECKPOINT_EVERY = 1000      # frames between saved model states (~1 min of 4K w
 PREFLIGHT_PLACES = 8         # alignment checks spread over the film before starting
 PREFLIGHT_FRAMES = 7         # consecutive frames per check (detects offsets up to +/-3)
 PLOT_SAMPLES = 2000          # points on the grain-over-time strip
+CPU_SECONDS_PER_4K_FRAME = 1.85   # analyser + decoding, one thread (The Beekeeper, see estimate_seconds)
+THREAD_EFFICIENCY = 0.85          # what each extra thread adds, measured on 24 threads
 _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
@@ -135,8 +137,8 @@ def estimate_seconds(encoded: VideoInfo, threads: int, source: VideoInfo | None 
     """
     pixels = max(encoded.width * encoded.height, source.width * source.height if source else 0)
     scale = pixels / (3840 * 2160)
-    cpu_per_frame = 1.85 * scale
-    return encoded.frame_count * cpu_per_frame / max(1, min(threads, cpu_count()) * 0.85)
+    cpu_per_frame = CPU_SECONDS_PER_4K_FRAME * scale
+    return encoded.frame_count * cpu_per_frame / max(1, min(threads, cpu_count()) * THREAD_EFFICIENCY)
 
 
 def frame_range(encoded: VideoInfo, source: VideoInfo, offset: int) -> tuple[int, int]:
@@ -290,8 +292,8 @@ def _pipeline_commands(tools: Tools, source: VideoInfo, encoded: VideoInfo, offs
     def number(info: VideoInfo, shift: int) -> str:
         return (f"settb={tb},setpts='round((T-{info.first_pts:.6f})*{fps.numerator}/{fps.denominator})"
                 f"{-shift:+d}'")
-    graph = (f"[0:{source.stream_index}]{_filters(source, g, crop)},{number(source, offset)}[s];"
-             f"[1:{encoded.stream_index}]{_filters(encoded, g, None)},{number(encoded, 0)}[e];"
+    graph = (f"[0:{source.stream_index}]{filter_chain(source, g, crop)},{number(source, offset)}[s];"
+             f"[1:{encoded.stream_index}]{filter_chain(encoded, g, None)},{number(encoded, 0)}[e];"
              f"[s][e]vstack=inputs=2:shortest=1[o]")
     ffmpeg = [tools.ffmpeg, "-v", "error", "-nostdin"]
     if source_hwaccel:
@@ -349,11 +351,11 @@ def analyze_every_frame(tools: Tools, source: VideoInfo, encoded: VideoInfo, off
             threads, table, checkpoint, resume)
         decoder = subprocess.Popen(ffmpeg_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                    stdin=subprocess.DEVNULL, creationflags=_NO_WINDOW)
-        cancel._track(decoder)
+        cancel.track(decoder)
         worker = subprocess.Popen(analyzer_cmd, stdin=decoder.stdout, stdout=subprocess.PIPE,
                                   stderr=subprocess.PIPE, creationflags=_NO_WINDOW)
         decoder.stdout.close()                      # the analyzer owns the pipe now
-        cancel._track(worker)
+        cancel.track(worker)
         dec_err, ana_err = deque(maxlen=20), deque(maxlen=20)
         threading.Thread(target=_drain, args=(decoder.stderr, dec_err), daemon=True).start()
         threading.Thread(target=_drain, args=(worker.stderr, ana_err), daemon=True).start()
@@ -381,8 +383,8 @@ def analyze_every_frame(tools: Tools, source: VideoInfo, encoded: VideoInfo, off
             worker.wait()
             decoder.wait()
         finally:
-            cancel._untrack(worker)
-            cancel._untrack(decoder)
+            cancel.untrack(worker)
+            cancel.untrack(decoder)
             for proc in (worker, decoder):
                 if proc.poll() is None:
                     proc.kill()

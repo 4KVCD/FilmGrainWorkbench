@@ -75,7 +75,7 @@ def source_crop_for(source: VideoInfo, encoded: VideoInfo) -> Crop | None:
     return Crop(w, source.height, (source.width - w) // 2 // 2 * 2, 0)
 
 
-def _filters(info: VideoInfo, target: Geometry, crop: Crop | None) -> str:
+def filter_chain(info: VideoInfo, target: Geometry, crop: Crop | None) -> str:
     parts = []
     if crop:
         parts.append(f"crop={crop.width}:{crop.height}:{crop.x}:{crop.y}")
@@ -98,13 +98,13 @@ def seek_args(info: VideoInfo, index: int) -> list[str]:
     return ["-seek_timestamp", "1", "-ss", f"{seconds:.6f}"]
 
 
-def _command(ffmpeg: str, info: VideoInfo, index: int, count: int, target: Geometry,
-             crop: Crop | None, output: str, with_times: bool = False) -> list[str]:
+def ffmpeg_command(ffmpeg: str, info: VideoInfo, index: int, count: int, target: Geometry,
+                   crop: Crop | None, output: str, with_times: bool = False) -> list[str]:
     # -fps_mode passthrough stops ffmpeg duplicating or dropping frames to
     # "fix" timestamps that are rounded to 1 ms (it did, and shifted every
     # later frame by one); -copyts keeps the original timestamps so each
     # frame's index is known.
-    filters = _filters(info, target, crop) + (",showinfo" if with_times else "")
+    filters = filter_chain(info, target, crop) + (",showinfo" if with_times else "")
     return [ffmpeg, "-hide_banner", "-v", "info" if with_times else "error", "-nostdin", "-y",
             "-copyts", *seek_args(info, index), "-i", str(info.path),
             "-map", f"0:{info.stream_index}", "-frames:v", str(count),
@@ -112,7 +112,7 @@ def _command(ffmpeg: str, info: VideoInfo, index: int, count: int, target: Geome
             "-f", "rawvideo", "-pix_fmt", target.pix_fmt, output]
 
 
-_PTS_TIME = re.compile(r"Parsed_showinfo.*? pts_time:\s*(-?[0-9.]+)")
+PTS_TIME = re.compile(r"Parsed_showinfo.*? pts_time:\s*(-?[0-9.]+)")
 
 
 def frame_index(info: VideoInfo, seconds: float) -> int:
@@ -141,12 +141,12 @@ def read_frames(ffmpeg: str, info: VideoInfo, index: int, count: int,
     start later than ``index``.
     """
     target = target or Geometry.of(info)
-    data, log = run_with_log(_command(ffmpeg, info, index, count, target, crop, "pipe:1",
-                                      with_times=True), cancel)
+    data, log = run_with_log(ffmpeg_command(ffmpeg, info, index, count, target, crop, "pipe:1",
+                                            with_times=True), cancel)
     n = len(data) // target.frame_bytes
     if n == 0:
         raise RuntimeError(f"{info.path.name}: frame {index} could not be decoded")
-    times = [float(t) for t in _PTS_TIME.findall(log)]
+    times = [float(t) for t in PTS_TIME.findall(log)]
     frames = []
     for k in range(n):
         y, u, v = split_planes(data[k * target.frame_bytes:(k + 1) * target.frame_bytes], target)
@@ -165,7 +165,7 @@ def extract_raw(ffmpeg: str, info: VideoInfo, index: int, count: int, output: Pa
                 crop: Crop | None = None) -> int:
     """Write ``count`` consecutive frames as raw planar YUV; return frames written."""
     target = target or Geometry.of(info)
-    run(_command(ffmpeg, info, index, count, target, crop, str(output)), cancel)
+    run(ffmpeg_command(ffmpeg, info, index, count, target, crop, str(output)), cancel)
     return output.stat().st_size // target.frame_bytes if output.exists() else 0
 
 

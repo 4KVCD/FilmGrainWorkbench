@@ -45,13 +45,13 @@ class CancelToken:
         if self._event.is_set():
             raise Cancelled()
 
-    def _track(self, process: subprocess.Popen) -> None:
+    def track(self, process: subprocess.Popen) -> None:
         with self._lock:
             self._processes.add(process)
         if self._event.is_set():
             process.kill()
 
-    def _untrack(self, process: subprocess.Popen) -> None:
+    def untrack(self, process: subprocess.Popen) -> None:
         with self._lock:
             self._processes.discard(process)
 
@@ -68,12 +68,12 @@ def run_with_log(command: list[str], cancel: CancelToken | None = None, *,
     except FileNotFoundError as exc:
         raise ToolError(f"Program not found: {command[0]}") from exc
     if cancel:
-        cancel._track(process)
+        cancel.track(process)
     try:
         out, err = process.communicate(stdin)
     finally:
         if cancel:
-            cancel._untrack(process)
+            cancel.untrack(process)
     if cancel and cancel.cancelled:
         raise Cancelled()
     message = err.decode("utf-8", "replace")

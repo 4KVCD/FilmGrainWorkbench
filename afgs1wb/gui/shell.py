@@ -33,7 +33,7 @@ class Workbench(QMainWindow):
             self.tabs.setTabToolTip(self.tabs.count() - 1, tip)
         self.setCentralWidget(self.tabs)
         settings_menu = self.menuBar().addMenu("&Settings")
-        settings_menu.addAction("External programs…", self.av1._edit_tools)
+        settings_menu.addAction("External programs…", self.av1.edit_tools)
         self.av1.tools_changed.connect(self._tools_changed)     # from the menu or the AV1 tab's banner
         if self.settings.value("shell/geometry"):
             self.restoreGeometry(self.settings.value("shell/geometry"))
@@ -47,11 +47,11 @@ class Workbench(QMainWindow):
     def data_dir(self):                                     # for the error handler
         return self.av1.data_dir
 
-    def _log(self, text: str) -> None:
+    def log(self, text: str) -> None:
         """For the error handler: the message goes to the tab in view (and the AV1 tab's activity log)."""
-        self.tabs.currentWidget().status_label.setText(text)
+        self.tabs.currentWidget().status.label.setText(text)
         if self.tabs.currentWidget() is self.av1:
-            self.av1._log(text)
+            self.av1.log(text)
 
     def show_tab(self, index: int) -> None:
         self.tabs.setCurrentIndex(index)
@@ -64,8 +64,7 @@ class Workbench(QMainWindow):
         self.settings.setValue("shell/tab", index)
 
     def _tools_changed(self) -> None:
-        self.vvc.tools = self.vvc._load_tools()            # the VVC tab uses the same ffmpeg / ffprobe
-        self.vvc._update_tools()
+        self.vvc.reload_tools()                             # the VVC tab uses the same ffmpeg / ffprobe
 
     def closeEvent(self, event) -> None:
         # Every tab is asked before any is shut down: the AV1 tab asks while it is writing,

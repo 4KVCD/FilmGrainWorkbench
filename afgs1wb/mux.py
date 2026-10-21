@@ -26,6 +26,7 @@ from .grain_params import GrainParams
 from .mkvwriter import MatroskaVideoWriter
 from .probe import VideoInfo
 from .tools import CancelToken, ToolError, Tools, run, run_text
+from .tuning import GrainPlan, StaticPlan
 from .vvc import (SEI_CONTENT_LIGHT_LEVEL, SEI_MASTERING_DISPLAY, insert_t35,
                   length_size_from_vvcc, prefix_sei_types)
 
@@ -144,11 +145,10 @@ def _merge_with_mkvmerge(mkvmerge: str, video: Path, original: Path, output: Pat
 
 
 def write_afgs1_mkv(tools: Tools, encoded: VideoInfo, output: str | Path,
-                    params: "GrainParams | GrainPlan", base_seed: int, progress,
+                    params: GrainParams | GrainPlan, base_seed: int, progress,
                     cancel: CancelToken) -> WriteReport:
     """``params`` is one parameter set for every picture, or a per-frame GrainPlan."""
     import av
-    from .tuning import GrainPlan, StaticPlan
 
     output = Path(output)
     if output.suffix.lower() != ".mkv":
