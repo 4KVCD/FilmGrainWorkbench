@@ -18,7 +18,7 @@ BEGIN
             VALUE "FileVersion", "@PROJECT_VERSION@"
             VALUE "InternalName", "FilmGrainWorkbench"
             VALUE "LegalCopyright", "MIT License"
-            VALUE "OriginalFilename", "FilmGrainWorkbench.exe"
+            VALUE "OriginalFilename", "Film Grain Workbench.exe"
             VALUE "ProductName", "Film Grain Workbench"
             VALUE "ProductVersion", "@PROJECT_VERSION@"
         END

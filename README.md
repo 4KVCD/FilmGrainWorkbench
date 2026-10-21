@@ -117,17 +117,18 @@ such as mpv).
 
 ## Build from source
 
-Needs Python 3.11 or newer on Windows.
+The app is C++20 with Qt 6 Widgets. It needs Visual Studio 2022 (the C++
+workload), CMake 3.25 or newer, Qt 6.5 or newer for MSVC 2022 64-bit and
+Python 3.11 or newer (only its standard library, for the build scripts).
 
 ```bat
-py -3 -m venv .venv
-.venv\Scripts\python -m pip install -r requirements-build.txt
-.venv\Scripts\python build.py
+py -3 build.py --qt C:\Qt\6.12.0\msvc2022_64
 ```
 
-`build.py` builds the programs in `bin`, then the download in
+`build.py` builds the programs in `bin`, then the app and the download in
 `build\FilmGrainWorkbench-<version>-win64.zip`. One part at a time:
-`--only analyzer`, `--only vvc` or `--only package`.
+`--only analyzer`, `--only vvc` or `--only package`; `--qt` is needed only the
+first time.
 
 - The grain analyzer (`analyzer/build.py`) needs gcc, cmake, ninja and git; it
   fetches libaom and builds it with gcc, like libaom's own Release build, so its
@@ -135,11 +136,22 @@ py -3 -m venv .venv
 - vvencapp and vvdecapp (`vvc/build_vvc_tools.ps1`) need Visual Studio 2022,
   CMake and git. VVenC is fraunhoferhhi/vvenc pull request 765, which includes
   pull request 764; vvdec is its master branch.
-- The package step (`packaging/package.py`) uses PyInstaller.
+- The app (`packaging/package.py`) builds with CMake; Qt's DLLs come from
+  windeployqt, FFmpeg's LGPL libraries from `native/ffmpeg`.
 
-Run from the source with `.venv\Scripts\pythonw -m afgs1wb`. Tests:
-`.venv\Scripts\python -m pip install -r requirements-dev.txt`, then
-`.venv\Scripts\python -m pytest`.
+To work on the app:
+
+```bat
+cmake --preset windows -DCMAKE_PREFIX_PATH=C:\Qt\6.12.0\msvc2022_64
+cmake --build --preset windows-release
+ctest --preset windows-release
+```
+
+The app is then `build\cmake\src\app\Release\Film Grain Workbench.exe`.
+Sources: `src/core` (the engine, no Qt), `src/platform` (running programs),
+`src/app` (the window). `fgw_walkthrough` (`tests/tools`) drives the window on
+real files, offscreen, and reports how long each step took and the longest
+the window did not respond.
 
 ## Notes on compatibility
 

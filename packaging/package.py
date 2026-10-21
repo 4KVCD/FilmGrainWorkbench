@@ -1,74 +1,91 @@
 """Make the Windows download: build/FilmGrainWorkbench-<version>-win64.zip.
 
-    python packaging/package.py        (or: python build.py --only package)
+    python packaging/package.py [--qt DIR]     (or: python build.py --only package)
 
-Needs PyInstaller (requirements-build.txt) and the programs in bin/ (build.py
-builds them). The zip holds one folder, "Film Grain Workbench":
+Builds the app (CMake, Release) and needs the programs in bin/ (build.py
+builds them). --qt is Qt's folder (for example C:\\Qt\\6.12.0\\msvc2022_64),
+needed only when the CMake build folder does not know it yet. The zip holds
+one folder, "Film Grain Workbench":
 
-    Film Grain Workbench.exe     the app (PyInstaller, one folder; Python and Qt in _internal)
-    bin/                         vvencapp, vvdecapp, the grain analyzer
+    Film Grain Workbench.exe     the app, with Qt's, FFmpeg's and the MSVC run-time's DLLs beside it
+    bin/                         vvencapp, vvdecapp, the grain analyzer (and the MSVC run-time they use)
     licenses/                    every license text; THIRD_PARTY_NOTICES.md says which is whose
     README.md, THIRD_PARTY_NOTICES.md
+
+Only the Python standard library is needed.
 """
 
 from __future__ import annotations
 
-from importlib import metadata
 from pathlib import Path
-import importlib.util
+import argparse
+import re
 import shutil
 import subprocess
 import sys
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
-from afgs1wb import __version__  # noqa: E402
-
 APP_NAME = "Film Grain Workbench"
 BUNDLED = ("vvencapp", "vvdecapp", "afgs1_grain_analyzer")
-BUILD = ROOT / "build"
-RESOURCES = ROOT / "afgs1wb" / "gui" / "resources"
-
-# Qt parts this widgets app never uses that PySide6 and Qt's plugins pull in: the network
-# module (and its TLS backends), software OpenGL, Qt Quick/QML (for the virtual keyboard
-# input plugin) and Qt PDF (an image format plugin). About 60 MB.
-EXCLUDED_MODULES = ("PySide6.QtNetwork", "PySide6.QtQml", "PySide6.QtQuick", "PySide6.QtPdf",
-                    "PySide6.QtOpenGL", "PySide6.QtVirtualKeyboard")
-UNUSED_FILES = ("opengl32sw.dll", "Qt6VirtualKeyboard.dll", "Qt6Quick.dll", "Qt6Qml.dll", "Qt6QmlMeta.dll",
-                "Qt6QmlModels.dll", "Qt6QmlWorkerScript.dll", "Qt6Pdf.dll", "Qt6OpenGL.dll", "Qt6Network.dll",
-                "plugins/platforminputcontexts", "plugins/imageformats/qpdf.dll", "plugins/tls",
-                "plugins/networkinformation")
-
-VERSION_INFO ="""VSVersionInfo(
-  ffi=FixedFileInfo(filevers={v4}, prodvers={v4}, mask=0x3f, flags=0x0, OS=0x40004,
-                    fileType=0x1, subtype=0x0, date=(0, 0)),
-  kids=[StringFileInfo([StringTable('040904B0', [
-          StringStruct('ProductName', '{name}'),
-          StringStruct('FileDescription', '{name}'),
-          StringStruct('FileVersion', '{version}'),
-          StringStruct('ProductVersion', '{version}'),
-          StringStruct('OriginalFilename', '{name}.exe'),
-          StringStruct('LegalCopyright', 'MIT license; third-party notices in THIRD_PARTY_NOTICES.md')])]),
-        VarFileInfo([VarStruct('Translation', [1033, 1200])])])
-"""
+CMAKE_BUILD = ROOT / "build" / "cmake"
+FFMPEG = ROOT / "native" / "ffmpeg"
+# What windeployqt leaves out: translations (the app is in English), the
+# compiler run-time (copied below from Visual Studio), the network module and
+# software OpenGL, the shader compilers the widgets never use, the styles
+# (the app uses Fusion, built into Qt Widgets) and the image formats (its one
+# image, the icon, is a PNG, which Qt reads without a plugin).
+WINDEPLOYQT_OPTIONS = ("--no-translations", "--no-compiler-runtime", "--no-system-d3d-compiler",
+                       "--no-system-dxc-compiler", "--no-opengl-sw", "--no-network",
+                       "--skip-plugin-types", "styles,imageformats", "--verbose", "0")
+# The MSVC run-time DLLs the app, Qt, vvencapp and vvdecapp import.
+RUNTIME_DLLS = ("msvcp140.dll", "msvcp140_1.dll", "msvcp140_2.dll", "msvcp140_atomic_wait.dll",
+                "vcruntime140.dll", "vcruntime140_1.dll")
 
 
-def _python_licenses(target: Path) -> None:
-    """The license files of the Python packages inside the app, and Python's own."""
-    target.mkdir(parents=True, exist_ok=True)
-    for package, wanted in (("numpy", "LICENSE.txt"), ("av", "LICENSE.txt")):
-        files = [f for f in metadata.distribution(package).files or [] if f.name == wanted]
-        if not files:
-            raise SystemExit(f"no {wanted} in the {package} package")
-        shutil.copyfile(files[0].locate(), target / f"{package}-LICENSE.txt")
-    python_license = Path(sys.base_prefix) / "LICENSE.txt"
-    if not python_license.is_file():
-        raise SystemExit(f"Python's license is not at {python_license}")
-    shutil.copyfile(python_license, target / "python-LICENSE.txt")
+def version() -> str:
+    match = re.search(r"project\(\w+ VERSION ([\d.]+)", (ROOT / "CMakeLists.txt").read_text(encoding="utf-8"))
+    if not match:
+        raise SystemExit("no project VERSION in CMakeLists.txt")
+    return match.group(1)
 
 
-def _zip(folder: Path, archive: Path) -> None:
+def run(command: list[str]) -> None:
+    print("+", " ".join(command), flush=True)
+    subprocess.run(command, cwd=ROOT, check=True)
+
+
+def build_app(qt: Path | None) -> Path:
+    """Builds the app; returns Qt's folder as the build knows it."""
+    configure = ["cmake", "--preset", "windows"]
+    if qt:
+        configure.append(f"-DCMAKE_PREFIX_PATH={qt}")
+    run(configure)
+    run(["cmake", "--build", "--preset", "windows-release", "--target", "FilmGrainWorkbench"])
+    cache = (CMAKE_BUILD / "CMakeCache.txt").read_text(encoding="utf-8")
+    match = re.search(r"^Qt6_DIR:PATH=(.+)$", cache, re.MULTILINE)
+    if not match:
+        raise SystemExit("the build found no Qt: pass --qt <Qt folder>")
+    return Path(match.group(1)).parents[2]  # <Qt>/lib/cmake/Qt6
+
+
+def msvc_runtime() -> Path:
+    """Visual Studio's folder of redistributable C++ run-time DLLs."""
+    vswhere = Path(r"C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe")
+    vs = subprocess.run([str(vswhere), "-latest", "-products", "*", "-property", "installationPath"],
+                        capture_output=True, text=True, check=True).stdout.strip()
+    folders = sorted(Path(vs, "VC", "Redist", "MSVC").glob("*/x64/Microsoft.VC14*.CRT"))
+    if not folders:
+        raise SystemExit(f"no C++ run-time redistributables under {vs}")
+    return folders[-1]
+
+
+def copy_runtime(source: Path, target: Path) -> None:
+    for name in RUNTIME_DLLS:
+        shutil.copy2(source / name, target / name)
+
+
+def zip_folder(folder: Path, archive: Path) -> None:
     archive.unlink(missing_ok=True)
     with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as z:
         for path in sorted(folder.rglob("*")):
@@ -76,49 +93,41 @@ def _zip(folder: Path, archive: Path) -> None:
 
 
 def main() -> int:
-    if importlib.util.find_spec("PyInstaller") is None:
-        print("PyInstaller is missing: pip install -r requirements-build.txt", file=sys.stderr)
-        return 1
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--qt", type=Path, help="Qt's folder, if the CMake build does not know it yet")
+    args = parser.parse_args()
     missing = [name for name in BUNDLED if not (ROOT / "bin" / f"{name}.exe").is_file()]
     if missing:
         print(f"not built: {', '.join(missing)} (python build.py)", file=sys.stderr)
         return 1
-    BUILD.mkdir(exist_ok=True)
-    numbers = [int(n) for n in __version__.split(".")] + [0]
-    version_file = BUILD / "version_info.txt"
-    version_file.write_text(VERSION_INFO.format(v4=tuple(numbers[:4]), name=APP_NAME, version=__version__),
-                            encoding="utf-8")
-    dist = BUILD / "dist"
-    result = subprocess.run([
-        sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean", "--windowed",
-        "--name", APP_NAME, "--icon", str(RESOURCES / "icon.ico"), "--version-file", str(version_file),
-        "--paths", str(ROOT), "--add-data", f"{RESOURCES};afgs1wb/gui/resources",
-        *(arg for module in EXCLUDED_MODULES for arg in ("--exclude-module", module)),
-        "--distpath", str(dist), "--workpath", str(BUILD / "pyinstaller"), "--specpath", str(BUILD),
-        str(ROOT / "packaging" / "launch.py")])
-    if result.returncode != 0:
-        return result.returncode
+    qt = build_app(args.qt)
+    runtime = msvc_runtime()
 
-    app = dist / APP_NAME
-    qt = app / "_internal" / "PySide6"
-    for name in UNUSED_FILES:
-        path = qt / name
-        if path.is_dir():
-            shutil.rmtree(path)
-        else:
-            path.unlink(missing_ok=True)
-    (app / "bin").mkdir(exist_ok=True)
+    app = ROOT / "build" / "package" / APP_NAME
+    shutil.rmtree(app, ignore_errors=True)
+    app.mkdir(parents=True)
+    exe = app / f"{APP_NAME}.exe"
+    shutil.copy2(CMAKE_BUILD / "src" / "app" / "Release" / f"{APP_NAME}.exe", exe)
+    for dll in (FFMPEG / "bin").glob("*.dll"):
+        shutil.copy2(dll, app)
+    run([str(qt / "bin" / "windeployqt.exe"), *WINDEPLOYQT_OPTIONS, str(exe)])
+    copy_runtime(runtime, app)
+
+    (app / "bin").mkdir()
     for name in BUNDLED:
         shutil.copy2(ROOT / "bin" / f"{name}.exe", app / "bin")
+    copy_runtime(runtime, app / "bin")  # Windows looks for a program's DLLs beside it, not beside the app
+
     licenses = app / "licenses"
-    shutil.copytree(ROOT / "licenses", licenses, dirs_exist_ok=True)
+    shutil.copytree(ROOT / "licenses", licenses)
     shutil.copyfile(ROOT / "LICENSE", licenses / "FilmGrainWorkbench-LICENSE.txt")
-    _python_licenses(licenses / "python")
+    shutil.copyfile(FFMPEG / "LICENSE.txt", licenses / "lgpl-2.1.txt")
+    shutil.copyfile(ROOT / "third_party" / "nlohmann" / "LICENSE.MIT", licenses / "nlohmann-json-LICENSE.txt")
     for name in ("README.md", "THIRD_PARTY_NOTICES.md"):
         shutil.copyfile(ROOT / name, app / name)
 
-    archive = BUILD / f"FilmGrainWorkbench-{__version__}-win64.zip"
-    _zip(app, archive)
+    archive = ROOT / "build" / f"FilmGrainWorkbench-{version()}-win64.zip"
+    zip_folder(app, archive)
     size = sum(f.stat().st_size for f in app.rglob("*") if f.is_file())
     print(f"{app}: {size / 1e6:.0f} MB\n{archive}: {archive.stat().st_size / 1e6:.0f} MB")
     return 0

@@ -16,12 +16,10 @@ its own license; the license texts are in the `licenses` folder.
 
 | Library | License |
 |---|---|
-| [Qt 6](https://www.qt.io/) and [Qt for Python (PySide6, Shiboken6)](https://doc.qt.io/qtforpython-6/) 6.11.2 | LGPL v3 (`lgpl-3.0.txt`, which builds on `gpl-3.0.txt`). The Qt and PySide6 libraries are separate files in the `_internal` folder and can be replaced with other builds of the same version. Source: https://download.qt.io/official_releases/QtForPython/ and https://code.qt.io/ |
-| [NumPy](https://numpy.org/) 2.5.3, with OpenBLAS | BSD 3-Clause; the bundled OpenBLAS, LAPACK and GCC runtime notices are in `python/numpy-LICENSE.txt` |
-| [PyAV](https://pyav.basswood-io.com/) 18.1.0 | BSD 3-Clause (`python/av-LICENSE.txt`) |
-| FFmpeg 8.1.2 libraries shipped with PyAV, with libx264, libx265 and other codec libraries | GPL v2 or later as built (`gpl-2.0.txt`). Build scripts and the versions of every library: https://github.com/PyAV-Org/pyav-ffmpeg; FFmpeg source: https://ffmpeg.org/download.html |
-| Python 3.14 runtime | PSF License (`python/python-LICENSE.txt`) |
-| [PyInstaller](https://pyinstaller.org/) bootloader | GPL v2 with an exception that allows it to be used with programs under any license |
+| [Qt 6](https://www.qt.io/) 6.12.0 (Qt Core, Qt GUI, Qt Widgets and the Windows platform plugin) | LGPL v3 (`lgpl-3.0.txt`, which builds on `gpl-3.0.txt`). The Qt libraries are separate DLLs beside the app (`Qt6*.dll`, `platforms`) and can be replaced with other builds of the same version. Source: https://download.qt.io/official_releases/qt/6.12/ and https://code.qt.io/. Qt contains third-party code (such as FreeType, HarfBuzz, libpng, PCRE2 and zlib) under its own licenses, listed at https://doc.qt.io/qt-6/licenses-used-in-qt.html |
+| [FFmpeg](https://ffmpeg.org/) 9.0.2 libraries: libavformat, libavcodec, libavutil, libswresample | LGPL 2.1 or later as built: no GPL or non-free parts, no external libraries (`lgpl-2.1.txt`). Separate DLLs beside the app (`avformat-63.dll`, `avcodec-63.dll`, `avutil-61.dll`, `swresample-7.dll`) that can be replaced. Source: https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz |
+| [nlohmann/json](https://github.com/nlohmann/json) 3.12.0, compiled into the app | MIT (`nlohmann-json-LICENSE.txt`) |
+| Microsoft Visual C++ run-time (`msvcp140*.dll`, `vcruntime140*.dll`, beside the app and in `bin`) | Redistributable files of Visual Studio 2022, distributed under its license terms |
 
 ## Not included
 

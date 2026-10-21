@@ -4,6 +4,15 @@
 //
 //   fgw_walkthrough av1 SOURCE ENCODE [OUTPUT.mkv]   browse, retune; with OUTPUT also Write and Verify
 //   fgw_walkthrough vvc SOURCE [FRAME]               browse, encode a scene, show every view
+//
+// A small pair that writes in seconds (49 frames of noisy test pattern, the
+// encode with audio and subtitles), into tests\.cache:
+//   ffmpeg -f lavfi -i testsrc2=size=320x184:rate=24:duration=2 -vf noise=c0s=12:c0f=t+u,format=yuv420p
+//          -c:v ffv1 grainy_source.mkv
+//   ffmpeg -f lavfi -i testsrc2=size=320x184:rate=24:duration=2 -f lavfi -i sine=frequency=440:duration=2
+//          -i sub.srt -vf noise=c0s=12:c0f=t+u,format=yuv420p -map 0 -map 1 -map 2
+//          -c:v libvvenc -preset faster -qp 37 -c:a aac -c:s srt grainy_vvc.mkv
+// (sub.srt: "1", "00:00:00,500 --> 00:00:01,500", "hello", one per line.)
 #include <chrono>
 #include <cstdio>
 #include <functional>
