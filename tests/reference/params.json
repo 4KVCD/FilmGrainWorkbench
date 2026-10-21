@@ -1,0 +1,562 @@
+{
+ "cases": [
+  {
+   "apply_grain": true,
+   "random_seed": 1000,
+   "y_points": [
+    [
+     0,
+     20
+    ],
+    [
+     64,
+     45
+    ],
+    [
+     128,
+     80
+    ],
+    [
+     255,
+     40
+    ]
+   ],
+   "cb_points": [
+    [
+     0,
+     10
+    ],
+    [
+     255,
+     30
+    ]
+   ],
+   "cr_points": [
+    [
+     16,
+     5
+    ],
+    [
+     100,
+     40
+    ],
+    [
+     240,
+     25
+    ]
+   ],
+   "chroma_scaling_from_luma": false,
+   "scaling_shift": 8,
+   "ar_coeff_lag": 0,
+   "ar_coeffs_y": [],
+   "ar_coeffs_cb": [
+    -20
+   ],
+   "ar_coeffs_cr": [
+    -25
+   ],
+   "ar_coeff_shift": 6,
+   "grain_scale_shift": 0,
+   "cb_mult": 128,
+   "cb_luma_mult": 192,
+   "cb_offset": 256,
+   "cr_mult": 120,
+   "cr_luma_mult": 200,
+   "cr_offset": 250,
+   "overlap_flag": true,
+   "clip_to_restricted_range": false
+  },
+  {
+   "apply_grain": true,
+   "random_seed": 1001,
+   "y_points": [
+    [
+     0,
+     20
+    ],
+    [
+     64,
+     45
+    ],
+    [
+     128,
+     80
+    ],
+    [
+     255,
+     40
+    ]
+   ],
+   "cb_points": [
+    [
+     0,
+     10
+    ],
+    [
+     255,
+     30
+    ]
+   ],
+   "cr_points": [
+    [
+     16,
+     5
+    ],
+    [
+     100,
+     40
+    ],
+    [
+     240,
+     25
+    ]
+   ],
+   "chroma_scaling_from_luma": false,
+   "scaling_shift": 9,
+   "ar_coeff_lag": 1,
+   "ar_coeffs_y": [
+    -30,
+    7,
+    -17,
+    20
+   ],
+   "ar_coeffs_cb": [
+    -20,
+    3,
+    -15,
+    8,
+    -10
+   ],
+   "ar_coeffs_cr": [
+    -25,
+    4,
+    -18,
+    11,
+    -11
+   ],
+   "ar_coeff_shift": 7,
+   "grain_scale_shift": 1,
+   "cb_mult": 129,
+   "cb_luma_mult": 189,
+   "cb_offset": 261,
+   "cr_mult": 120,
+   "cr_luma_mult": 200,
+   "cr_offset": 250,
+   "overlap_flag": false,
+   "clip_to_restricted_range": false
+  },
+  {
+   "apply_grain": true,
+   "random_seed": 1002,
+   "y_points": [
+    [
+     0,
+     20
+    ],
+    [
+     64,
+     45
+    ],
+    [
+     128,
+     80
+    ],
+    [
+     255,
+     40
+    ]
+   ],
+   "cb_points": [
+    [
+     0,
+     10
+    ],
+    [
+     255,
+     30
+    ]
+   ],
+   "cr_points": [
+    [
+     16,
+     5
+    ],
+    [
+     100,
+     40
+    ],
+    [
+     240,
+     25
+    ]
+   ],
+   "chroma_scaling_from_luma": false,
+   "scaling_shift": 10,
+   "ar_coeff_lag": 2,
+   "ar_coeffs_y": [
+    -30,
+    7,
+    -17,
+    20,
+    -4,
+    -28,
+    9,
+    -15,
+    22,
+    -2,
+    -26,
+    11
+   ],
+   "ar_coeffs_cb": [
+    -20,
+    3,
+    -15,
+    8,
+    -10,
+    13,
+    -5,
+    18,
+    0,
+    -18,
+    5,
+    -13,
+    10
+   ],
+   "ar_coeffs_cr": [
+    -25,
+    4,
+    -18,
+    11,
+    -11,
+    18,
+    -4,
+    25,
+    3,
+    -19,
+    10,
+    -12,
+    17
+   ],
+   "ar_coeff_shift": 8,
+   "grain_scale_shift": 0,
+   "cb_mult": 130,
+   "cb_luma_mult": 186,
+   "cb_offset": 266,
+   "cr_mult": 120,
+   "cr_luma_mult": 200,
+   "cr_offset": 250,
+   "overlap_flag": true,
+   "clip_to_restricted_range": false
+  },
+  {
+   "apply_grain": true,
+   "random_seed": 1003,
+   "y_points": [
+    [
+     0,
+     20
+    ],
+    [
+     64,
+     45
+    ],
+    [
+     128,
+     80
+    ],
+    [
+     255,
+     40
+    ]
+   ],
+   "cb_points": [
+    [
+     0,
+     10
+    ],
+    [
+     255,
+     30
+    ]
+   ],
+   "cr_points": [
+    [
+     16,
+     5
+    ],
+    [
+     100,
+     40
+    ],
+    [
+     240,
+     25
+    ]
+   ],
+   "chroma_scaling_from_luma": false,
+   "scaling_shift": 11,
+   "ar_coeff_lag": 3,
+   "ar_coeffs_y": [
+    -30,
+    7,
+    -17,
+    20,
+    -4,
+    -28,
+    9,
+    -15,
+    22,
+    -2,
+    -26,
+    11,
+    -13,
+    24,
+    0,
+    -24,
+    13,
+    -11,
+    26,
+    2,
+    -22,
+    15,
+    -9,
+    28
+   ],
+   "ar_coeffs_cb": [
+    -20,
+    3,
+    -15,
+    8,
+    -10,
+    13,
+    -5,
+    18,
+    0,
+    -18,
+    5,
+    -13,
+    10,
+    -8,
+    15,
+    -3,
+    20,
+    2,
+    -16,
+    7,
+    -11,
+    12,
+    -6,
+    17,
+    -1
+   ],
+   "ar_coeffs_cr": [
+    -25,
+    4,
+    -18,
+    11,
+    -11,
+    18,
+    -4,
+    25,
+    3,
+    -19,
+    10,
+    -12,
+    17,
+    -5,
+    24,
+    2,
+    -20,
+    9,
+    -13,
+    16,
+    -6,
+    23,
+    1,
+    -21,
+    8
+   ],
+   "ar_coeff_shift": 9,
+   "grain_scale_shift": 1,
+   "cb_mult": 131,
+   "cb_luma_mult": 183,
+   "cb_offset": 271,
+   "cr_mult": 120,
+   "cr_luma_mult": 200,
+   "cr_offset": 250,
+   "overlap_flag": false,
+   "clip_to_restricted_range": true
+  },
+  {
+   "apply_grain": true,
+   "random_seed": 7391,
+   "y_points": [
+    [
+     0,
+     0
+    ],
+    [
+     255,
+     60
+    ]
+   ],
+   "cb_points": [],
+   "cr_points": [],
+   "chroma_scaling_from_luma": true,
+   "scaling_shift": 8,
+   "ar_coeff_lag": 1,
+   "ar_coeffs_y": [
+    4,
+    -3,
+    2,
+    9
+   ],
+   "ar_coeffs_cb": [
+    1,
+    2,
+    3,
+    4,
+    5
+   ],
+   "ar_coeffs_cr": [
+    -1,
+    -2,
+    -3,
+    -4,
+    -5
+   ],
+   "ar_coeff_shift": 7,
+   "grain_scale_shift": 0,
+   "cb_mult": 128,
+   "cb_luma_mult": 192,
+   "cb_offset": 256,
+   "cr_mult": 128,
+   "cr_luma_mult": 192,
+   "cr_offset": 256,
+   "overlap_flag": true,
+   "clip_to_restricted_range": false
+  },
+  {
+   "apply_grain": true,
+   "random_seed": 12,
+   "y_points": [],
+   "cb_points": [
+    [
+     0,
+     30
+    ],
+    [
+     255,
+     30
+    ]
+   ],
+   "cr_points": [
+    [
+     0,
+     20
+    ],
+    [
+     255,
+     50
+    ]
+   ],
+   "chroma_scaling_from_luma": false,
+   "scaling_shift": 10,
+   "ar_coeff_lag": 2,
+   "ar_coeffs_y": [],
+   "ar_coeffs_cb": [
+    3,
+    3,
+    3,
+    3,
+    3,
+    3,
+    3,
+    3,
+    3,
+    3,
+    3,
+    3
+   ],
+   "ar_coeffs_cr": [
+    -2,
+    -2,
+    -2,
+    -2,
+    -2,
+    -2,
+    -2,
+    -2,
+    -2,
+    -2,
+    -2,
+    -2
+   ],
+   "ar_coeff_shift": 6,
+   "grain_scale_shift": 0,
+   "cb_mult": 128,
+   "cb_luma_mult": 192,
+   "cb_offset": 256,
+   "cr_mult": 128,
+   "cr_luma_mult": 192,
+   "cr_offset": 256,
+   "overlap_flag": true,
+   "clip_to_restricted_range": false
+  },
+  {
+   "apply_grain": true,
+   "random_seed": 99,
+   "y_points": [
+    [
+     30,
+     255
+    ],
+    [
+     200,
+     255
+    ]
+   ],
+   "cb_points": [],
+   "cr_points": [],
+   "chroma_scaling_from_luma": false,
+   "scaling_shift": 11,
+   "ar_coeff_lag": 0,
+   "ar_coeffs_y": [],
+   "ar_coeffs_cb": [],
+   "ar_coeffs_cr": [],
+   "ar_coeff_shift": 6,
+   "grain_scale_shift": 0,
+   "cb_mult": 128,
+   "cb_luma_mult": 192,
+   "cb_offset": 256,
+   "cr_mult": 128,
+   "cr_luma_mult": 192,
+   "cr_offset": 256,
+   "overlap_flag": false,
+   "clip_to_restricted_range": true
+  },
+  {
+   "apply_grain": false,
+   "random_seed": 0,
+   "y_points": [],
+   "cb_points": [],
+   "cr_points": [],
+   "chroma_scaling_from_luma": false,
+   "scaling_shift": 8,
+   "ar_coeff_lag": 0,
+   "ar_coeffs_y": [],
+   "ar_coeffs_cb": [],
+   "ar_coeffs_cr": [],
+   "ar_coeff_shift": 6,
+   "grain_scale_shift": 0,
+   "cb_mult": 128,
+   "cb_luma_mult": 192,
+   "cb_offset": 256,
+   "cr_mult": 128,
+   "cr_luma_mult": 192,
+   "cr_offset": 256,
+   "overlap_flag": true,
+   "clip_to_restricted_range": false
+  }
+ ]
+}
