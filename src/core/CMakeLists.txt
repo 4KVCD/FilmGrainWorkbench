@@ -10,6 +10,7 @@ add_library(fgw_core STATIC
     src/frames.cpp
     src/fullscan.cpp
     src/gaussian.cpp
+    src/installation.cpp
     src/grain_params.cpp
     src/mkv_writer.cpp
     src/mux.cpp

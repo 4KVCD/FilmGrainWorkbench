@@ -62,7 +62,7 @@ namespace {
 // build that is not packaged runs.
 std::filesystem::path source_bin() {
 #ifdef FGW_SOURCE_DIR
-    return std::filesystem::path(FGW_SOURCE_DIR) / "bin";
+    return (std::filesystem::path(FGW_SOURCE_DIR) / "bin").make_preferred();  // CMake writes "/"
 #else
     return {};
 #endif

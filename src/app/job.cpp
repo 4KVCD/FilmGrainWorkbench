@@ -1,0 +1,50 @@
+#include "job.h"
+
+#include <exception>
+
+namespace fgw::app {
+
+Job::Job(QString name, Work work, QObject* parent) : QThread(parent), name_(std::move(name)), work_(std::move(work)) {
+    // QThread::finished comes from the job's thread; this receiver lives on
+    // the window's, so the outcome is delivered there.
+    connect(this, &QThread::finished, this, &Job::deliver_outcome);
+}
+
+void Job::run() {
+    const Progress progress = [this](double fraction, const std::string& message) {
+        emit progressed(fraction, QString::fromStdString(message));
+    };
+    try {
+        deliver_ = work_(token_, progress);
+        outcome_ = token_.cancelled() ? Outcome::cancelled : Outcome::succeeded;
+    } catch (const Cancelled&) {
+        outcome_ = Outcome::cancelled;
+    } catch (const std::exception& error) {
+        outcome_ = token_.cancelled() ? Outcome::cancelled : Outcome::failed;
+        error_ = QString::fromStdString(error.what());
+    } catch (...) {
+        outcome_ = Outcome::failed;
+        error_ = QStringLiteral("unexpected error");
+    }
+}
+
+void Job::deliver_outcome() {
+    switch (outcome_) {
+        case Outcome::succeeded:
+            if (deliver_) {
+                deliver_();
+            }
+            emit succeeded();
+            break;
+        case Outcome::failed:
+            emit failed(error_);
+            break;
+        case Outcome::cancelled:
+            emit cancelled();
+            break;
+    }
+    emit ended();
+    deleteLater();
+}
+
+}  // namespace fgw::app
