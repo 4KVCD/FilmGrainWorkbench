@@ -285,10 +285,12 @@ std::string format_grain_table(const std::vector<TableEntry>& entries) {
         append_points(out, "sCr", p.cr_points);
         // libaom writes luma_count + 1 chroma coefficients, zeros where a set has fewer.
         const auto chroma_written = static_cast<std::size_t>(luma_ar_coefficient_count(p.ar_coeff_lag) + 1);
-        const std::size_t padding = chroma_written - std::min(chroma_written, p.ar_coeffs_cb.size());
+        const auto padding = [chroma_written](const std::vector<int>& coeffs) {
+            return chroma_written - std::min(chroma_written, coeffs.size());
+        };
         append_coefficients(out, "cY", p.ar_coeffs_y, 0);
-        append_coefficients(out, "cCb", p.ar_coeffs_cb, padding);
-        append_coefficients(out, "cCr", p.ar_coeffs_cr, padding);
+        append_coefficients(out, "cCb", p.ar_coeffs_cb, padding(p.ar_coeffs_cb));
+        append_coefficients(out, "cCr", p.ar_coeffs_cr, padding(p.ar_coeffs_cr));
     }
     return out;
 }

@@ -11,6 +11,7 @@
 #include "fgw/rational.h"
 #include "fgw/text.h"
 #include "fgw/timeline.h"
+#include "fgw/tuning.h"
 #include "fgw/vvc_grain.h"
 #include "reference.h"
 
@@ -84,7 +85,7 @@ TEST(Probe, ReadsFfprobesAnswersAndBuildsCommandsAsPython) {
     }
 }
 
-TEST(Timeline, ReadsPythonsSavedAnalysesAndSamplesTheSameSigmas) {
+TEST(Timeline, ReadsPythonsSavedAnalysesAndSamplesSigmasAsTheTuneLabel) {
     const json reference = load_reference("engine.json").at("timeline");
     TimelineModel model = TimelineModel::from_json(reference.at("json").get<std::string>());
     // Written again, the same analysis (the text may differ in its number formatting).
@@ -105,10 +106,15 @@ TEST(Timeline, ReadsPythonsSavedAnalysesAndSamplesTheSameSigmas) {
     model.sigma_values.clear();
     sample_sigmas(model, nullptr);
     EXPECT_EQ(model.sigma_frames, reference.at("sigma_frames").get<std::vector<std::int64_t>>());
-    const std::vector<double> expected = reference.at("sigma_values").get<std::vector<double>>();
-    ASSERT_EQ(model.sigma_values.size(), expected.size());
-    for (std::size_t i = 0; i < expected.size(); ++i) {
-        EXPECT_NEAR(model.sigma_values[i], expected[i], 1e-9);
+    // The strip's sigma at a frame is the tune label's (the Python app's
+    // strip used one seed of the label's three: 0.7 % apart here).
+    ASSERT_EQ(model.sigma_values.size(), model.sigma_frames.size());
+    for (std::size_t i = 0; i < model.sigma_frames.size(); ++i) {
+        const GrainParams& params = model.segment_at(model.sigma_frames[i]).params;
+        const double label = params.apply_grain && !params.y_points.empty()
+                                 ? entry_sigmas(params, model.bit_depth, model.subsampling_x, model.subsampling_y).y[128]
+                                 : 0.0;
+        EXPECT_NEAR(model.sigma_values[i], label, 1e-9) << i;
     }
     EXPECT_THROW(TimelineModel::from_json(R"({"kind": "timeline", "version": 2})"), std::invalid_argument);
 }

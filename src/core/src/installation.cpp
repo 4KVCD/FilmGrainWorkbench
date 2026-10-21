@@ -75,7 +75,17 @@ ProgramCheck program(const std::string& name, const std::string& purpose, const 
 }  // namespace
 
 std::vector<ProgramCheck> check_installation(const Tools& tools, const VvcTools& vvc_tools) {
-    const auto version = [](const std::string& path) { return first_line({path, "--version"}); };
+    const auto version = [](const std::string& path) {
+        Answer answer = first_line({path, "--version"});
+        // vvdecapp names itself by the path it was started with
+        // ("C:\...\bin\vvdecapp.exe version 3.3.0"): the path is shown above it.
+        const std::size_t word = answer.text.find(" version ");
+        const std::size_t slash = word == std::string::npos ? word : answer.text.find_last_of("\\/", word);
+        if (answer.ok && slash != std::string::npos) {
+            answer.text.erase(0, slash + 1);
+        }
+        return answer;
+    };
     std::vector<ProgramCheck> checks = {
         program("ffmpeg", "decodes video (both tabs)", tools.ffmpeg, ffmpeg_answer),
         program("ffprobe", "reads video properties (both tabs)", tools.ffprobe,

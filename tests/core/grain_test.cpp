@@ -105,6 +105,17 @@ TEST(GrainTable, FormatsAndParsesAsPython) {
         EXPECT_EQ(parsed[i].params, params_from_json(expected.at("params"))) << i;
     }
     EXPECT_EQ(format_grain_table(parsed), reference.at("text").get<std::string>());
+
+    // Each chroma set is padded to libaom's count by its own length: with Cb
+    // coefficients and none for Cr, Cr was written short (padded by Cb's).
+    TableEntry lopsided{0, 1, parsed.front().params};
+    lopsided.params.ar_coeff_lag = 1;  // 4 luma, 5 chroma coefficients
+    lopsided.params.ar_coeffs_y = {1, 2, 3, 4};
+    lopsided.params.ar_coeffs_cb = {1, 2, 3, 4, 5};
+    lopsided.params.ar_coeffs_cr = {};
+    const std::string text = format_grain_table({lopsided});
+    EXPECT_NE(text.find("\tcCr 0 0 0 0 0\n"), std::string::npos) << text;
+
     EXPECT_THROW(parse_grain_table("filmgrn1\nE 0 1 1 7391 0\n"), std::invalid_argument);
     EXPECT_THROW(parse_grain_table("not a table"), std::invalid_argument);
 }

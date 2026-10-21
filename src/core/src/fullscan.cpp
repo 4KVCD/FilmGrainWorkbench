@@ -100,15 +100,15 @@ std::optional<std::int64_t> checkpoint_frame(const std::filesystem::path& path) 
 
 namespace {
 
-// Luma sigma at mid-grey (sample units) of one segment's parameters.
+// Luma sigma at mid-grey (sample units) of one segment's parameters,
+// averaged over the same seeds as the tune label's (entry_sigmas), so the
+// strip and the label give the same number for a frame.
 double segment_sigma(const GrainParams& params, int bit_depth) {
     if (params.y_points.empty() || !params.apply_grain) {
         return 0.0;
     }
-    static constexpr int one_seed[] = {1};
     const std::array<int, 256> lut = scaling_lut(params.y_points);
-    return static_cast<double>(lut[128]) / (1 << params.scaling_shift) *
-           luma_template_std(params, bit_depth, one_seed);
+    return static_cast<double>(lut[128]) / (1 << params.scaling_shift) * luma_template_std(params, bit_depth);
 }
 
 }  // namespace
