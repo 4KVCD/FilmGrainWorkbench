@@ -34,6 +34,16 @@
 #ifdef _WIN32
 #include <fcntl.h>
 #include <io.h>
+/* 64-bit file offsets (long is 32 bits on Windows). A film's table is ~50 MB,
+ * so this is not needed today; the resume position just never depends on it. */
+#define fseek64 _fseeki64
+#define ftell64 _ftelli64
+#define truncate_file(f, size) _chsize_s(_fileno(f), (size))
+#else
+#include <unistd.h>
+#define fseek64 fseeko
+#define ftell64 ftello
+#define truncate_file(f, size) ftruncate(fileno(f), (off_t)(size))
 #endif
 #include <pthread.h>
 #include <stdint.h>
@@ -322,12 +332,6 @@ static void *worker_main(void *arg) {
 
 /* ------------------------------------------------------------------ output */
 
-static int params_equal(const aom_film_grain_t *a, const aom_film_grain_t *b) {
-  aom_film_grain_t x = *a, y = *b;
-  x.random_seed = y.random_seed = 0;  /* seeds are applied per frame by the writer */
-  return !memcmp(&x, &y, sizeof(x));
-}
-
 static void write_entry(FILE *f, long long start, long long end, const aom_film_grain_t *p) {
   fprintf(f, "E %lld %lld %d %d 1\n", start, end, p->apply_grain, p->random_seed);
   fprintf(f, "\tp %d %d %d %d %d %d %d %d %d %d %d %d\n", p->ar_coeff_lag, p->ar_coeff_shift,
@@ -493,11 +497,9 @@ int main(int argc, char **argv) {
       return 1;
     }
     out = fopen(o.output, "r+b");
-    if (!out || fseek(out, (long)pr.output_size, SEEK_SET) != 0) { fprintf(stderr, "cannot reopen %s\n", o.output); return 1; }
+    if (!out || fseek64(out, pr.output_size, SEEK_SET) != 0) { fprintf(stderr, "cannot reopen %s\n", o.output); return 1; }
     /* drop anything written after the checkpoint */
-#ifdef _WIN32
-    if (_chsize_s(_fileno(out), pr.output_size) != 0) { fprintf(stderr, "cannot truncate output\n"); return 1; }
-#endif
+    if (truncate_file(out, pr.output_size) != 0) { fprintf(stderr, "cannot truncate output\n"); return 1; }
   } else {
     out = fopen(o.output, "wb");
     if (!out) { fprintf(stderr, "cannot write %s: %s\n", o.output, strerror(errno)); return 1; }
@@ -556,7 +558,8 @@ int main(int argc, char **argv) {
       pr.have_seg = 1;
       pr.seg_start = frame;
       pr.seg_params = pr.running;
-    } else if (!params_equal(&pr.seg_params, &pr.running)) {
+    } else if (!aom_check_grain_params_equiv(&pr.seg_params, &pr.running)) {
+      /* libaom's comparison: the used fields only, not the seed (the writer sets it per frame) */
       write_entry(out, pr.seg_start, frame, &pr.seg_params);
       pr.seg_start = frame;
       pr.seg_params = pr.running;
@@ -569,7 +572,7 @@ int main(int argc, char **argv) {
 
     if (o.checkpoint && (frame - o.start_frame) % o.checkpoint_every == 0) {
       fflush(out);
-      pr.output_size = ftell(out);
+      pr.output_size = ftell64(out);
       if (!save_checkpoint(o.checkpoint, &model, &pr)) fprintf(stderr, "warning: checkpoint not saved\n");
     }
     if (frame % 8 == 0) {

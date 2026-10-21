@@ -7,9 +7,12 @@ import subprocess
 import numpy as np
 import pytest
 
+from afgs1wb.bits import BitWriter
 from afgs1wb.probe import probe
 from afgs1wb.tools import CancelToken
-from afgs1wb.vvcgrain import DECODED, GRAIN, VvcSettings, cut_scene, encode_scene, find_vvc_tools, read_grain
+from afgs1wb.vvc import escape_rbsp, sei_nal
+from afgs1wb.vvcgrain import (DECODED, GRAIN, GrainComponent, GrainSet, VvcSettings, cut_scene, encode_scene,
+                              find_vvc_tools, read_grain)
 
 from conftest import CACHE
 
@@ -67,8 +70,126 @@ def test_clip_carries_and_shows_the_analysed_grain(tools, vvc_tools, film_crop, 
             assert side["log2_scale_factor"] == mine.log2_scale_factor
 
 
-def test_reading_grain_from_nothing_gives_nothing():
+# ---------------------------------------------------------------- synthetic H.266 streams
+
+def _ue(w: BitWriter, value: int) -> None:
+    w.put(0, (value + 1).bit_length() - 1)
+    w.put(value + 1, (value + 1).bit_length())
+
+
+def _nal(kind: int, w: BitWriter) -> bytes:
+    w.put(1, 1)                                     # rbsp_stop_one_bit
+    return b"\x00\x00\x01" + bytes((0, (kind << 3) | 1)) + escape_rbsp(w.to_bytes())
+
+
+def _sps(lsb_bits: int) -> bytes:
+    """Just the fields read_grain reads, as in an SPS without profile, subpictures or cropping."""
+    w = BitWriter()
+    w.put(0, 8 + 3 + 4)                             # ids, max sublayers - 1 = 0, chroma format, CTU size
+    w.put(0, 3)                                     # no PTL/DPB/HRD, no GDR, no resampling
+    _ue(w, 64), _ue(w, 64)
+    w.put(0, 2)                                     # no conformance window, no subpictures
+    _ue(w, 2)
+    w.put(0, 2)
+    w.put(lsb_bits - 4, 4)
+    return _nal(15, w)
+
+
+def _picture_header(w: BitWriter, irap: bool, non_reference: bool, lsb: int, lsb_bits: int) -> None:
+    w.put(int(irap), 1)
+    w.put(int(non_reference), 1)
+    if irap:
+        w.put(0, 1)                                 # not GDR
+    w.put(0, 1)                                     # no inter slices
+    _ue(w, 0)                                       # PPS id
+    w.put(lsb, lsb_bits)
+
+
+def _slice(kind: int, lsb: int, lsb_bits: int = 8, non_reference: bool = False) -> bytes:
+    w = BitWriter()
+    w.put(1, 1)                                     # sh_picture_header_in_slice_header_flag
+    _picture_header(w, kind in (7, 8, 9), non_reference, lsb, lsb_bits)
+    w.put(0b1011, 4)                                # the rest of the slice
+    return _nal(kind, w)
+
+
+def _picture_header_nal(lsb: int, lsb_bits: int) -> bytes:
+    w = BitWriter()
+    _picture_header(w, False, False, lsb, lsb_bits)
+    return _nal(19, w)
+
+
+def _slice_after_picture_header(kind: int) -> bytes:
+    w = BitWriter()
+    w.put(0, 1)                                     # its picture header came in a PH NAL unit
+    w.put(0b1011, 4)
+    return _nal(kind, w)
+
+
+def _fgc(mark: int, persist: bool = False, values: tuple = (40,)) -> bytes:
+    """A frequency-model FGC SEI with luma only; ``mark`` goes in log2_scale_factor to tell them apart."""
+    w = BitWriter()
+    w.put(0, 1 + 2 + 1 + 2)                         # not cancelled, model 0, no colour description, additive
+    w.put(mark, 4)
+    w.put(0b100, 3)                                 # luma only
+    w.put(0, 8)                                     # one intensity interval
+    w.put(len(values) - 1, 3)
+    w.put(16, 8), w.put(235, 8)
+    for v in values:
+        _ue(w, 2 * v - 1 if v > 0 else -2 * v)      # se(v)
+    w.put(int(persist), 1)
+    return b"\x00\x00\x01" + sei_nal(19, w.to_bytes(), 0, 1)
+
+
+_CANCEL = b"\x00\x00\x01" + sei_nal(19, b"\x80", 0, 1)
+
+
+def _marks(grain) -> list:
+    return [g.log2_scale_factor if g else None for g in grain]
+
+
+def test_grain_follows_display_order_persistence_cancel_and_sequences():
     assert read_grain(b"") == []
+    stream = (_sps(8)
+              + _fgc(1, persist=True) + _slice(7, 0)        # IDR: 1 persists ...
+              + _fgc(2) + _slice(0, 4)                      # coded before 1-3, shown after them
+              + _slice(0, 2) + _slice(0, 1) + _slice(0, 3)  # ... over these (display order)
+              + _slice(0, 5)                                # 2 did not persist
+              + _fgc(3, persist=True) + _slice(0, 6)
+              + _CANCEL + _slice(0, 7) + _slice(0, 8)       # a cancel ends 3
+              + _fgc(4, persist=True) + _slice(0, 9)
+              + _slice(7, 0))                               # a new sequence ends 4
+    assert _marks(read_grain(stream)) == [1, 1, 1, 1, 2, None, 3, None, None, 4, None]
+
+
+def test_picture_order_wraps_and_skips_non_reference_pictures_like_vvdec():
+    # 4-bit POC LSBs (wrap at 16). Coded order POC 0, 8, 15 (non-reference), 6, 14, 18, 25 (RASL), 13.
+    # 6 is only 6 if POC 15 is not the previous reference picture (else it reads as 22), and
+    # 13 only 13 if the leading picture 25 is not (else 29). POC 14 comes as a picture header
+    # NAL unit and two slices.
+    stream = (_sps(4)
+              + _fgc(0) + _slice(7, 0, 4)
+              + _fgc(1) + _slice(0, 8, 4)
+              + _fgc(2) + _slice(0, 15, 4, non_reference=True)
+              + _fgc(3) + _slice(0, 6, 4)
+              + _fgc(4) + _picture_header_nal(14, 4) + _slice_after_picture_header(0)
+              + _slice_after_picture_header(0)
+              + _fgc(5) + _slice(0, 18 % 16, 4)
+              + _fgc(6) + _slice(3, 25 % 16, 4)
+              + _fgc(7) + _slice(0, 13, 4))
+    assert _marks(read_grain(stream)) == [0, 3, 1, 7, 4, 2, 5, 6]
+
+
+def test_frequency_cut_offs_default_as_h274_says():
+    def luma(values) -> str:
+        return GrainSet(0, 0, 3, [GrainComponent([(16, 235, list(values))]), None, None]).describe().splitlines()[1]
+    assert luma([40]) == "Y: 16–235: 40 cut-off H8 V8"
+    assert luma([40, 7]) == "Y: 16–235: 40 cut-off H7 V7"
+    assert luma([40, 7, 5]) == "Y: 16–235: 40 cut-off H7 V5"
+    auto_regressive = GrainSet(1, 0, 3, [GrainComponent([(0, 255, [40, 3, -2])]), None, None])
+    assert auto_regressive.describe().splitlines()[1] == "Y: 0–255: 40 AR 3 -2"
+    assert read_grain(_sps(8) + _fgc(0, values=(40, 7, 5)) + _slice(7, 0))[0].components[0].pieces == \
+        [(16, 235, [40, 7, 5])]
 
 
 def test_work_folders_of_crashed_windows_are_deleted_and_open_ones_kept(tmp_path):

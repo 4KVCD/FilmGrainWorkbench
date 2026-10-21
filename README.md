@@ -37,8 +37,13 @@ Grain flags default to libaom's: overlap on, no clipping to the limited range.
 - **ffmpeg / ffprobe** with VVC decoding. FFmpeg 7.1 or newer applies AFGS1
   grain when decoding VVC.
 - **mkvmerge** from [MKVToolNix](https://mkvtoolnix.download/).
-- The grain analyzer: `python analyzer/build.py` (needs gcc, cmake and ninja;
-  it fetches libaom).
+- The programs in `bin`: `python build.py` builds them all, or one part with
+  `--only analyzer` or `--only vvc`:
+  - the grain analyzer (`analyzer/build.py`; gcc, cmake, ninja and git; it
+    fetches libaom and builds it with gcc, like libaom's own Release build, so
+    its floating-point results match libaom's);
+  - vvencapp and vvdecapp for the VVC tab (`vvc/build_vvc_tools.ps1`; Visual
+    Studio 2022, CMake and git).
 
 The app looks for ffmpeg, ffprobe and mkvmerge on `PATH` and in the usual
 install folders; set them under *Settings → External programs* otherwise.
@@ -78,17 +83,18 @@ the latest parameters. Inside the encoded scene, the views are:
 The side panel shows the grain parameters the frame carries (read from the
 bitstream, both the frequency and the auto-regressive model), how much grain
 VVenC removed and vvdec adds, and the colour shift the grain causes. Inside an
-encoded scene, changing the strength, QP, preset or scene length encodes the
-scene again (all three modes); outside it, nothing is encoded.
+encoded scene, changing the strength, QP or preset encodes the scene again
+(all three modes); outside it, nothing is encoded. A new scene length applies
+when *Encode this scene* is pressed next.
 
 Temporary files: one scene at a time, in a folder in `%TEMP%` (for 33 frames
 at 3840×1608 about 4.3 GB: the source frames once, and each mode decoded with
 and without grain). Whatever is replaced is deleted as soon as nothing reads
-it, the folder when the window closes, and folders left by a crash when the
-next window opens.
+it, the folder when the app closes, and folders left by a crash when the app
+next opens.
 
-vvencapp and vvdecapp are built by `vvc\build_vvc_tools.ps1` (Visual Studio
-2022 and CMake) into `bin`: VVenC from fraunhoferhhi/vvenc pull request 765,
+vvencapp and vvdecapp (`python build.py --only vvc`) are VVenC from
+fraunhoferhhi/vvenc pull request 765,
 which includes pull request 764 (`--fga 1` VTM JVET-AN0237 port, `--fga 2`
 calibrated, `--fga 3` auto-regressive model), and vvdec master.
 
