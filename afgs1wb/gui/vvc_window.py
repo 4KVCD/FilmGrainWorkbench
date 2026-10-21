@@ -1,11 +1,13 @@
 """VVC grain analyzer: a source video, after VVenC removed its grain, and with vvdec's grain synthesis.
 
-There is no analysis step: the frame shown is encoded (with the clip around it)
-as soon as it is chosen, and again when a VVenC setting changes.
+Browsing shows the source alone, decoded by ffmpeg. "Encode this scene" encodes
+the frames around the one shown with VVenC; inside that scene every view is
+available, and a changed VVenC setting encodes the scene again.
 """
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import os
@@ -22,11 +24,11 @@ from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QDoubleSpinBo
                                QSplitter, QVBoxLayout, QWidget)
 
 from .. import display
-from ..frames import Crop
+from ..frames import Crop, Frame, Geometry, read_frames
 from ..probe import VideoInfo, probe
 from ..tools import Tools, ToolError, detect_tools
 from ..vvcgrain import (DECODED, FGA_MODES, GRAIN as GRAIN_FILE, PRESETS, SOURCE as SOURCE_FILE, Clip,
-                        VvcSettings, clip_start, detect_black_bars, find_vvc_tools, frame_stats, make_clip)
+                        VvcSettings, detect_black_bars, find_vvc_tools, frame_stats, make_clip)
 from .jobs import Job
 from .viewer import ENCODED, GRAIN, GRAIN_ONLY, SOURCE, FrameView, PreviewState, ViewerWindow
 
@@ -40,6 +42,8 @@ VIEW_TIPS = {SOURCE: "The source frame (cropped like the encode).",
              GRAIN_ONLY: "The grain vvdec adds, amplified 4×, on mid-grey."}
 VIDEO_FILTER = "Video files (*.mkv *.mp4 *.mov *.webm *.ts *.m2ts *.y4m);;All files (*)"
 KEEP_CLIPS = 2                  # encoded clips kept on disk (each holds 3 raw copies of its frames)
+PREFETCH = 4                    # source frames decoded per seek while browsing
+SOURCE_CACHE = 16               # source frames kept for stepping back and forth (~18 MB each at 4K)
 
 
 def _qimage(rgb: np.ndarray) -> QImage:
@@ -74,6 +78,10 @@ class VvcGrainWindow(QMainWindow):
         self.job_key: tuple | None = None
         self.frame_job: Job | None = None
         self.frame_pending = False
+        self.wanted: tuple[int, VvcSettings, Crop | None] | None = None    # the scene asked to be encoded
+        self.source_frames: OrderedDict[tuple, Frame] = OrderedDict()
+        self.last_read = 0
+        self.preferred_mode = GRAIN                 # the view chosen last, restored inside a scene
         self.state = PreviewState(VIEW_NAMES)
         self.viewer_window: ViewerWindow | None = None
         self._build()
@@ -133,16 +141,26 @@ class VvcGrainWindow(QMainWindow):
         self.preset_combo = QComboBox()
         self.preset_combo.addItems(PRESETS)
         self.frames_spin = QSpinBox(minimum=9, maximum=129, value=33)
-        self.frames_spin.setToolTip("Frames encoded around the frame shown. VVenC analyses the grain once per "
+        self.frames_spin.setToolTip("Frames Encode this scene encodes, centred on the frame shown. VVenC analyses the grain once per "
                                     "GOP (32 frames), so 33 covers one GOP and the next.")
         for label, widget in (("Film grain analysis", self.fga_combo), ("Strength", self.strength_spin),
                               ("QP", self.qp_spin), ("Preset", self.preset_combo),
-                              ("Clip length", self.frames_spin)):
+                              ("Scene length", self.frames_spin)):
             form.addRow(label, widget)
         for combo in (self.fga_combo, self.preset_combo):
             combo.currentIndexChanged.connect(self._settings_changed)
         for spin in (self.strength_spin, self.qp_spin, self.frames_spin):
             spin.valueChanged.connect(self._settings_changed)
+        self.encode_button = QPushButton("Encode this scene  [E]")
+        self.encode_button.setProperty("primary", True)
+        self.encode_button.setToolTip("Encode the frames around the one shown with VVenC, then show them "
+                                      "without and with vvdec's grain synthesis.")
+        self.encode_button.clicked.connect(self._encode_scene)
+        form.addRow(self.encode_button)
+        self.scene_label = QLabel()
+        self.scene_label.setObjectName("info")
+        self.scene_label.setWordWrap(True)
+        form.addRow(self.scene_label)
         self.tools_label = QLabel()
         self.tools_label.setObjectName("info")
         self.tools_label.setWordWrap(True)
@@ -262,6 +280,7 @@ class VvcGrainWindow(QMainWindow):
         add("-", lambda: view.step_zoom(-1))
         add("0", lambda: view.set_zoom(1.0))
         add("F", view.fit)
+        add("E", self._encode_scene)
 
     # ------------------------------------------------------------------ settings
     def _load_tools(self) -> Tools:
@@ -330,6 +349,8 @@ class VvcGrainWindow(QMainWindow):
         if self.job and self.job.isRunning():
             self.job.cancel()                       # its finished signal then shows the new source
         self._drop_clips()
+        self.source_frames.clear()
+        self.wanted = None
         self.source, self.crop, self.crop_known = None, None, False
         self.crop_label.setText("")
         if not path:
@@ -355,6 +376,8 @@ class VvcGrainWindow(QMainWindow):
 
     def _crop_toggled(self) -> None:
         self._save()
+        self.source_frames.clear()
+        self.wanted = None
         if self.source:
             self.converter = None
             self._show()
@@ -382,9 +405,15 @@ class VvcGrainWindow(QMainWindow):
         self.frame_timer.start()
 
     def _settings_changed(self, *_) -> None:
+        """Inside an encoded scene, encode it again with the new settings; while browsing, nothing."""
         self._save()
-        if self.source:
-            self.status_label.setText("Settings changed: encoding again…")
+        if not self.source:
+            return
+        self._update_scene_label()
+        scene = self._scene_at(self.current_index)
+        if scene:
+            self.wanted = (scene.start, self._vvc_settings(), scene.crop)
+            self.status_label.setText("Settings changed: encoding the scene again…")
             self.settings_timer.start()
 
     # ------------------------------------------------------------------ encoding
@@ -398,24 +427,49 @@ class VvcGrainWindow(QMainWindow):
                 return clip
         return None
 
+    def _scene_at(self, index: int) -> Clip | None:
+        """The newest encoded scene holding this frame, whatever its settings."""
+        crop = self._wanted_crop()
+        return next((c for c in reversed(self.clips) if c.covers(index) and c.crop == crop), None)
+
+    def _scene_range(self) -> tuple[int, int]:
+        """First frame and length of the scene "Encode this scene" would encode: centred on the frame shown."""
+        length = min(self.frames_spin.value(), self.source.frame_count)
+        start = max(0, min(self.current_index - length // 2, self.source.frame_count - length))
+        return start, length
+
+    def _encode_scene(self) -> None:
+        if not self.source or self.vvc_tools.missing():
+            return
+        start, _ = self._scene_range()
+        self.wanted = (start, self._vvc_settings(), self._wanted_crop())
+        self.preferred_mode = GRAIN
+        self._show()
+
     def _show(self) -> None:
-        """Show the current frame, encoding the clip around it first when there is none."""
+        """Show the current frame: its encoded scene when there is one, the source alone otherwise."""
         if not self.source:
             return
         if self.crop_check.isChecked() and not self.crop_known:
             self._start_job(("crop", str(self.source.path)), self._detect_bars())
             return
-        settings, index = self._vvc_settings(), self.current_index
+        index, settings = self.current_index, self._vvc_settings()
         clip = self._find_clip(index, settings)
         if clip:
-            self._render(clip, index)
-            return
-        start = clip_start(index, settings.frames)
-        key = ("encode", start, settings, self._wanted_crop())
-        if self.job_key == key and self.job and self.job.isRunning():
-            return                                  # already being encoded
-        self.state.clear(f"Encoding frames {start:,}–{start + settings.frames - 1:,} with VVenC…")
-        self._start_job(key, self._encode(start, settings))
+            self.wanted = None
+        elif self.wanted:
+            start, wanted_settings, crop = self.wanted
+            if wanted_settings == settings and crop == self._wanted_crop() and \
+                    start <= index < start + settings.frames:
+                key = ("encode", start, settings, crop)
+                if not (self.job_key == key and self.job and self.job.isRunning()):
+                    self._start_job(key, self._encode(start, settings))
+        # While a scene is encoded again, the one there is stays on screen until the new one is ready.
+        scene = clip or self._scene_at(index)
+        if scene:
+            self._render(scene, index)
+        else:
+            self._render_source(index)
 
     def _detect_bars(self):
         source, ffmpeg = self.source, self.tools.ffmpeg
@@ -452,6 +506,7 @@ class VvcGrainWindow(QMainWindow):
             while len(self.clips) > KEEP_CLIPS:
                 self.retired.append(self.clips.pop(0))
             self._remove_retired()
+            self.wanted = None
             self.status_label.setText(f"Encoded frames {clip.start:,}–{clip.start + clip.count - 1:,} in "
                                       f"{clip.encode_seconds:.1f} s ({clip.kbps:,.0f} kb/s).")
         return "Encoding", work, done
@@ -483,13 +538,15 @@ class VvcGrainWindow(QMainWindow):
 
     def _failed(self, name: str, message: str) -> None:
         self.job.setProperty("failed", True)
+        self.wanted = None
         self.status_label.setText(f"{name} failed.")
         self.state.clear(f"{name} failed:\n\n{message}")
 
     def _stop(self) -> None:
-        """The Cancel button: stop, and do not start again until the frame or a setting changes."""
+        """The Cancel button: stop, and do not start again until asked."""
         if self.job and self.job.isRunning():
             self.job.setProperty("failed", True)
+            self.wanted = None
             self.job.cancel()
 
     def _drop_clips(self) -> None:
@@ -507,6 +564,79 @@ class VvcGrainWindow(QMainWindow):
         self.retired = []
 
     # ------------------------------------------------------------------ frames
+    def _geometry(self) -> Geometry:
+        """10-bit 4:2:0 at the picture size encoded: what VVenC codes and what is shown."""
+        crop = self._wanted_crop()
+        w, h = (crop.width, crop.height) if crop else (self.source.width, self.source.height)
+        return Geometry(w, h, 10, 1, 1)
+
+    def _converter(self, g: Geometry) -> display.Converter:
+        src = self.source
+        if self.converter is None or (self.converter.fmt.width, self.converter.fmt.height) != (g.width, g.height):
+            self.converter = display.Converter(display.DisplayFormat(
+                g.bit_depth, src.limited_range, src.matrix, src.transfer, src.primaries, g.width, g.height))
+        return self.converter
+
+    def _render_source(self, index: int) -> None:
+        """Show the source frame alone (no encode): browsing for a scene."""
+        if self.frame_job and self.frame_job.isRunning():
+            self.frame_pending = True
+            return
+        self.frame_pending = False
+        src, crop, g, ffmpeg = self.source, self._wanted_crop(), self._geometry(), self.tools.ffmpeg
+        converter = self._converter(g)
+        cached = self.source_frames.get(index)
+        backwards = index < self.last_read
+        self.last_read = index
+        first = max(0, index - PREFETCH + 1) if backwards else index
+
+        def work(token, progress):
+            frames = [cached] if cached else read_frames(ffmpeg, src, first, PREFETCH, token, g, crop)
+            frame = next((f for f in frames if f.index == index), None)
+            if frame is None:
+                raise RuntimeError(f"frame {index:,} could not be decoded (a cut file starts with pictures "
+                                   "that need earlier frames)")
+            return index, frames, _qimage(converter.to_rgb(frame.y, frame.u, frame.v))
+
+        job = Job("Frame", work, self)
+        job.succeeded.connect(lambda result: self._source_ready(*result))
+        job.failed.connect(lambda msg: self.state.clear(f"Could not show frame {index:,}:\n\n{msg}"))
+        job.finished.connect(self._frame_job_finished)
+        self.frame_job = job
+        job.start()
+
+    def _source_ready(self, index: int, frames: list[Frame], image: QImage) -> None:
+        for f in frames:
+            self.source_frames[f.index] = f
+            self.source_frames.move_to_end(f.index)
+        while len(self.source_frames) > SOURCE_CACHE:
+            self.source_frames.popitem(last=False)
+        if index != self.current_index:
+            self.frame_pending = True
+            return
+        self.state.set_images({SOURCE: image}, f"frame {index:,} · {_timecode(index / float(self.source.fps))}")
+        busy = self.job and self.job.isRunning() and self.job_key and self.job_key[0] == "encode"
+        self.info_label.setText("Encoding the scene…" if busy else
+                                "Source frame. Press Encode this scene (E) to encode the frames around it "
+                                "with VVenC and see them without and with the grain synthesis.")
+        if not (self.job and self.job.isRunning()):
+            self.status_label.setText(f"Frame {index:,}.")
+        self._update_scene_label()
+
+    def _update_scene_label(self) -> None:
+        if not self.source:
+            self.scene_label.setText("")
+            return
+        scene = self._scene_at(self.current_index)
+        if scene:
+            text = f"Showing the encoded scene: frames {scene.start:,}–{scene.start + scene.count - 1:,}."
+            if scene.settings != self._vvc_settings():
+                text += " It was encoded with other settings than these: press Encode this scene to use them."
+        else:
+            start, length = self._scene_range()
+            text = f"Encodes frames {start:,}–{start + length - 1:,} ({length / float(self.source.fps):.1f} s)."
+        self.scene_label.setText(text)
+
     def _render(self, clip: Clip, index: int) -> None:
         if self.frame_job and self.frame_job.isRunning():
             self.frame_pending = True
@@ -516,11 +646,8 @@ class VvcGrainWindow(QMainWindow):
             self.state.clear(f"Frame {index:,} cannot be decoded from the source (a cut file starts with "
                              "pictures that need earlier frames).")
             return
-        g, src = clip.geometry, self.source
-        if self.converter is None or (self.converter.fmt.width, self.converter.fmt.height) != (g.width, g.height):
-            self.converter = display.Converter(display.DisplayFormat(
-                g.bit_depth, src.limited_range, src.matrix, src.transfer, src.primaries, g.width, g.height))
-        converter = self.converter
+        g = clip.geometry
+        converter = self._converter(g)
 
         def work(token, progress):
             frames = {which: clip.frame(which, index) for which in (SOURCE_FILE, DECODED, GRAIN_FILE)}
@@ -553,6 +680,8 @@ class VvcGrainWindow(QMainWindow):
             return
         caption = f"frame {index:,} · {_timecode(index / float(self.source.fps))}"
         self.state.set_images(images, caption)
+        self.state.set_mode(self.preferred_mode)
+        self._update_scene_label()
         grain = clip.grain_at(index)
         signalled = grain.describe() if grain else "no film grain parameters"
         n_sets = len({g.describe() for g in clip.grain if g})
@@ -574,7 +703,10 @@ class VvcGrainWindow(QMainWindow):
 
     # ------------------------------------------------------------------ view modes
     def _set_mode(self, mode: int) -> None:
-        self.state.set_mode(mode)
+        if self.state.set_mode(mode):
+            self.preferred_mode = mode
+        elif mode != SOURCE and self.source:
+            self.status_label.setText("Press Encode this scene (E) to see the VVC views of this frame.")
         self._sync_mode_buttons()
 
     def _sync_mode_buttons(self) -> None:

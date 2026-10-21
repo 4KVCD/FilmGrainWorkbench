@@ -143,11 +143,6 @@ class Clip:
         shutil.rmtree(self.folder, ignore_errors=True)
 
 
-def clip_start(index: int, length: int) -> int:
-    """Clips tile the video, so stepping through frames re-encodes only at clip borders."""
-    return (index // length) * length
-
-
 def detect_black_bars(ffmpeg: str, info: VideoInfo, cancel: CancelToken | None = None) -> Crop | None:
     """Letterbox / pillarbox borders, from ffmpeg's cropdetect at three places in the video.
 

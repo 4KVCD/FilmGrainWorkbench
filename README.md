@@ -57,10 +57,12 @@ Tests: `.venv\Scripts\python -m pip install -r requirements-dev.txt` then
 ## VVC grain analyzer
 
 VVC's own film grain, instead of AV1's: `"Run VVC Grain Analyzer.bat"`, or
-*Window → VVC grain analyzer* in the workbench. Choose a source video; the
-clip around the frame shown is encoded by VVenC with its film grain analysis
-(`--fga`), which writes an H.274 film grain characteristics SEI message, and
-decoded by vvdec twice. The views:
+*Window → VVC grain analyzer* in the workbench. Choose a source video and
+browse it for a scene: only the source is decoded while you look. *Encode
+this scene* (E) encodes the frames around the one shown with VVenC and its
+film grain analysis (`--fga`), which writes an H.274 film grain
+characteristics SEI message, and decodes them with vvdec twice. Inside the
+encoded scene, the views are:
 
 1. **Source**: the source frame, cropped like the encode.
 2. **VVC, grain removed**: what VVenC coded (its MCTF pre-filter and the
@@ -70,9 +72,9 @@ decoded by vvdec twice. The views:
 
 The side panel shows the grain parameters the frame carries (read from the
 bitstream, both the frequency and the auto-regressive model), how much grain
-VVenC removed and vvdec adds, and the colour shift the grain causes. Changing
-the analysis mode, strength, QP, preset or clip length encodes again; stepping
-within a clip does not.
+VVenC removed and vvdec adds, and the colour shift the grain causes. Inside an
+encoded scene, changing the analysis mode, strength, QP, preset or scene
+length encodes the scene again; outside it, nothing is encoded.
 
 vvencapp and vvdecapp are built by `vvc\build_vvc_tools.ps1` (Visual Studio
 2022 and CMake) into `bin`: VVenC from fraunhoferhhi/vvenc pull request 765,
