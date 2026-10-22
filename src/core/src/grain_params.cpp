@@ -283,14 +283,16 @@ std::string format_grain_table(const std::vector<TableEntry>& entries) {
         append_points(out, "sY", p.y_points);
         append_points(out, "sCb", p.cb_points);
         append_points(out, "sCr", p.cr_points);
-        // libaom writes luma_count + 1 chroma coefficients, zeros where a set has fewer.
-        const auto chroma_written = static_cast<std::size_t>(luma_ar_coefficient_count(p.ar_coeff_lag) + 1);
-        const auto padding = [chroma_written](const std::vector<int>& coeffs) {
-            return chroma_written - std::min(chroma_written, coeffs.size());
+        // libaom writes luma_count luma and luma_count + 1 chroma coefficients
+        // whatever the points, zeros where a set has fewer (luma has none when
+        // its strength is 0 %), and its reader wants exactly that many.
+        const auto luma_written = static_cast<std::size_t>(luma_ar_coefficient_count(p.ar_coeff_lag));
+        const auto padding = [](const std::vector<int>& coeffs, std::size_t written) {
+            return written - std::min(written, coeffs.size());
         };
-        append_coefficients(out, "cY", p.ar_coeffs_y, 0);
-        append_coefficients(out, "cCb", p.ar_coeffs_cb, padding(p.ar_coeffs_cb));
-        append_coefficients(out, "cCr", p.ar_coeffs_cr, padding(p.ar_coeffs_cr));
+        append_coefficients(out, "cY", p.ar_coeffs_y, padding(p.ar_coeffs_y, luma_written));
+        append_coefficients(out, "cCb", p.ar_coeffs_cb, padding(p.ar_coeffs_cb, luma_written + 1));
+        append_coefficients(out, "cCr", p.ar_coeffs_cr, padding(p.ar_coeffs_cr, luma_written + 1));
     }
     return out;
 }

@@ -115,6 +115,12 @@ TEST(GrainTable, FormatsAndParsesAsPython) {
     lopsided.params.ar_coeffs_cr = {};
     const std::string text = format_grain_table({lopsided});
     EXPECT_NE(text.find("\tcCr 0 0 0 0 0\n"), std::string::npos) << text;
+    // Luma at 0 % has no curve and no coefficients: libaom's reader (and
+    // ours) still wants all of them, as zeros.
+    lopsided.params.y_points.clear();
+    lopsided.params.ar_coeffs_y.clear();
+    const std::vector<TableEntry> read_back = parse_grain_table(format_grain_table({lopsided}));
+    EXPECT_EQ(read_back.front().params.ar_coeffs_y, (std::vector<int>{0, 0, 0, 0}));
 
     EXPECT_THROW(parse_grain_table("filmgrn1\nE 0 1 1 7391 0\n"), std::invalid_argument);
     EXPECT_THROW(parse_grain_table("not a table"), std::invalid_argument);
@@ -125,8 +131,12 @@ TEST(Tuning, ScaledParametersAndSigmasMatchPython) {
     const json reference = load_reference("tuning.json");
     ASSERT_FALSE(reference.at("scaled").empty());
     for (const json& c : reference.at("scaled")) {
+        const GrainParams& source = params.at(c.at("params").get<std::size_t>());
+        if (source.chroma_scaling_from_luma) {
+            continue;  // the Python app dropped such chroma grain: ChromaFromLumaKeepsItsGrain checks it now
+        }
         const Tuning tuning{c.at("luma"), c.at("chroma"), c.at("overlap"), c.at("clip"), c.at("seed")};
-        const ScaledParams scaled = scale_params(params.at(c.at("params").get<std::size_t>()), tuning, c.at("subsampled_420"));
+        const ScaledParams scaled = scale_params(source, tuning, c.at("subsampled_420"));
         EXPECT_EQ(scaled.params, params_from_json(c.at("result"))) << c.dump();
         EXPECT_EQ(scaled.clipped, c.at("clipped").get<bool>()) << c.dump();
     }
@@ -138,6 +148,33 @@ TEST(Tuning, ScaledParametersAndSigmasMatchPython) {
             EXPECT_NEAR(sigmas.cr[i], c.at("cr").at(i).get<double>(), 1e-9);
         }
     }
+}
+
+// Chroma scaled from luma is written as explicit chroma curves; at 100 % the
+// grain is the same. (It used to lose its chroma grain.)
+TEST(Tuning, ChromaFromLumaKeepsItsGrain) {
+    GrainParams p;
+    p.y_points = {{0, 40}, {128, 90}, {255, 70}};
+    p.scaling_shift = 11;  // the finest steps: the scaled curve is the same curve
+    p.ar_coeff_lag = 0;
+    p.ar_coeffs_cb = {5};
+    p.ar_coeffs_cr = {-3};
+    p.chroma_scaling_from_luma = true;
+    const ScaledParams scaled = scale_params(p, Tuning{1.0, 1.0, p.overlap_flag, false, 0}, true);
+    EXPECT_FALSE(scaled.params.chroma_scaling_from_luma);
+    EXPECT_FALSE(scaled.params.cb_points.empty());
+    Frame frame = make_frame(Geometry{64, 48, 10, 1, 1});
+    for (Plane* plane : {&frame.y, &frame.u, &frame.v}) {
+        for (std::size_t i = 0; i < plane->samples.size(); ++i) {
+            plane->samples[i] = static_cast<std::uint16_t>(64 + (i * 37) % 876);
+        }
+    }
+    Frame flagged = frame;
+    add_grain(flagged, p, 1234);
+    add_grain(frame, scaled.params, 1234);
+    EXPECT_EQ(frame.u.samples, flagged.u.samples);
+    EXPECT_EQ(frame.v.samples, flagged.v.samples);
+    EXPECT_EQ(frame.y.samples, flagged.y.samples);
 }
 
 TEST(Tuning, FramePlanScalesEstimatesAddedLater) {

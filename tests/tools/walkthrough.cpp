@@ -5,6 +5,7 @@
 //   fgw_walkthrough av1 SOURCE ENCODE [OUTPUT.mkv]   browse, retune; with OUTPUT also Write and Verify
 //   fgw_walkthrough vvc SOURCE [FRAME]               browse, encode a scene, show every view
 //   fgw_walkthrough error                            an error in a slot is reported, not fatal
+//   fgw_walkthrough keys SOURCE ENCODE               the frame keys against sliders, spin boxes, viewer
 //
 // A small pair that writes in seconds (49 frames of noisy test pattern, the
 // encode with audio and subtitles), into tests\.cache:
@@ -24,6 +25,8 @@
 #include <QEventLoop>
 #include <QFile>
 #include <QFileInfo>
+#include <QMessageBox>
+#include <QTest>
 #include <QTemporaryDir>
 #include <QTimer>
 
@@ -141,6 +144,19 @@ struct Walkthrough {
     StallMeter stalls;
     QElapsedTimer step_clock;
     int failures = 0;
+    QTimer box_closer{nullptr};  // a message box (a failed job's) runs its own loop: closed from there
+    QString last_box;   // and its text kept for the report
+
+    // Closes message boxes as a user would, keeping the last one's text.
+    void close_message_boxes() {
+        QObject::connect(&box_closer, &QTimer::timeout, [this] {
+            if (auto* box = qobject_cast<QMessageBox*>(QApplication::activeModalWidget())) {
+                last_box = box->text();
+                box->close();
+            }
+        });
+        box_closer.start(100);
+    }
 
     // Runs the event loop until `done` holds, up to `seconds`.
     bool wait(const std::function<bool()>& done, double seconds = 120) {
@@ -177,6 +193,7 @@ struct Walkthrough {
     void av1(const QString& source, const QString& encoded, const QString& output) {
         Av1Tab& tab = *window.av1();
         window.show_tab(Workbench::av1_tab);
+        close_message_boxes();
         const auto idle = [&tab] { return !tab.loading() && !tab.frame_timer_.isActive(); };
         const auto estimated = [&] { return idle() && tab.estimates_.contains(tab.current_index_); };
 
@@ -185,8 +202,20 @@ struct Walkthrough {
         tab.load_video(Av1Tab::Kind::source);
         tab.encoded_edit_->setText(encoded);
         tab.load_video(Av1Tab::Kind::encoded);
-        bool ok = wait([&] { return estimated() && tab.state_->has(source_view) && tab.state_->has(grain_view); }, 300);
-        report("open both videos, first frame with grain", ok, tab.offset_note_->text());
+        // A video that cannot be read, or a frame that cannot be shown, ends the walk.
+        const auto failed = [&tab] {
+            return tab.source_info_->styleSheet().contains("#ff7b72") || tab.encoded_info_->styleSheet().contains("#ff7b72") ||
+                   (!tab.loading() && tab.state_->images().empty() && !tab.state_->placeholder().startsWith("Loading"));
+        };
+        bool ok = wait([&] { return (estimated() && tab.state_->has(source_view) && tab.state_->has(grain_view)) ||
+                                    (idle() && failed()); }, 300) &&
+                  tab.state_->has(grain_view);
+        report("open both videos, first frame with grain", ok,
+               ok ? tab.offset_note_->text()
+                  : tab.encoded_info_->text() + " | " + tab.state_->placeholder().section('\n', 0, 2));
+        if (!ok) {
+            return;
+        }
 
         begin();
         const std::int64_t start = tab.current_index_;
@@ -233,7 +262,7 @@ struct Walkthrough {
         tab.write();
         ok = wait([&] { return !tab.busy(); }, 3600) && tab.written_.has_value();
         report("Write (every frame)", ok,
-               (ok ? tab.write_label_->text() : tab.status_->label()->text()).left(160));
+               (ok ? tab.write_label_->text() : tab.status_->label()->text() + " " + last_box).left(200));
         if (!ok) {
             return;
         }
@@ -259,6 +288,7 @@ struct Walkthrough {
     void vvc(const QString& source, std::int64_t frame) {
         VvcTab& tab = *window.vvc();
         window.show_tab(Workbench::vvc_tab);
+        close_message_boxes();
         const auto idle = [&tab] { return !tab.busy() && !tab.frame_timer_.isActive(); };
 
         begin();
@@ -334,6 +364,73 @@ struct Walkthrough {
         wait([] { return false; }, 0.3);
         report("the app carries on", window.isVisible() && window.vvc()->isVisible());
     }
+
+    // Real key presses (Qt Test goes through the shortcut map as a keyboard
+    // does): the frame keys leave a focused slider or spin box its own keys,
+    // and a pop-out viewer keeps its keys when the other tab is shown.
+    void keys(const QString& source, const QString& encoded) {
+        Av1Tab& tab = *window.av1();
+        begin();
+        window.show_tab(Workbench::av1_tab);
+        window.activateWindow();
+        static_cast<void>(QTest::qWaitForWindowActive(&window));
+        tab.source_edit_->setText(source);
+        tab.load_video(Av1Tab::Kind::source);
+        tab.encoded_edit_->setText(encoded);
+        tab.load_video(Av1Tab::Kind::encoded);
+        const bool loaded = wait([&] { return !tab.loading() && tab.state_->has(grain_view); }, 120);
+        report("open both videos", loaded);
+        if (!loaded) {
+            return;
+        }
+
+        begin();
+        tab.set_mode(grain_view);
+        tab.luma_slider_->setFocus();
+        const int before = tab.luma_slider_->value();
+        QTest::keyClick(tab.luma_slider_, Qt::Key_Left);
+        bool ok = tab.luma_slider_->value() == before - 1 && tab.state_->mode() == grain_view;
+        report("← on the focused strength slider moves the slider", ok,
+               QString("slider %1 → %2, view %3").arg(before).arg(tab.luma_slider_->value()).arg(tab.state_->mode()));
+
+        begin();
+        tab.seed_spin_->setFocus();
+        tab.seed_spin_->selectAll();
+        QTest::keyClicks(tab.seed_spin_, "1234");
+        ok = tab.seed_spin_->text() == "1234" && tab.state_->mode() == grain_view;
+        report("digits typed into the seed box go into it", ok,
+               QString("seed '%1', view %2").arg(tab.seed_spin_->text()).arg(tab.state_->mode()));
+
+        begin();
+        tab.pane_->view()->setFocus();
+        QTest::keyClick(tab.pane_->view(), Qt::Key_Left);
+        ok = tab.state_->mode() == encoded_view;
+        report("← on the picture shows the encode", ok, QString("view %1").arg(tab.state_->mode()));
+
+        begin();
+        tab.open_viewer_window();
+        window.show_tab(Workbench::vvc_tab);
+        // The offscreen platform makes no second window active, so a key
+        // cannot reach the viewer here: its keys must be on, the hidden
+        // page's keys in the main window off.
+        const auto enabled = [](const QObject* owner, const QWidget* in_window) {
+            int on = 0;
+            int all = 0;
+            for (const QShortcut* shortcut : owner->findChildren<QShortcut*>()) {
+                if (qobject_cast<QWidget*>(shortcut->parent())->window() == in_window) {
+                    ++all;
+                    on += shortcut->isEnabled() ? 1 : 0;
+                }
+            }
+            return std::pair{on, all};
+        };
+        const auto [viewer_on, viewer_all] = enabled(tab.viewer_window_, tab.viewer_window_);
+        const auto [page_on, page_all] = enabled(&tab, &window);
+        ok = viewer_all > 0 && viewer_on == viewer_all && page_all > 0 && page_on == 0;
+        report("with the VVC tab shown: AV1 viewer keys on, AV1 page keys off", ok,
+               QString("viewer %1 of %2 on, page %3 of %4 on").arg(viewer_on).arg(viewer_all).arg(page_on).arg(page_all));
+        tab.viewer_window_->close();
+    }
 };
 
 }  // namespace fgw::app
@@ -372,9 +469,10 @@ int main(int argc, char* argv[]) {
     QApplication::setApplicationVersion(FGW_VERSION);
     apply_theme(app);
     const QStringList args = QApplication::arguments().mid(1);
-    if (args.isEmpty() || (args[0] == "av1" && args.size() < 3) || (args[0] == "vvc" && args.size() < 2) ||
-        !QStringList{"av1", "vvc", "error"}.contains(args[0])) {
-        std::fprintf(stderr, "usage: fgw_walkthrough av1 SOURCE ENCODE [OUTPUT.mkv] | vvc SOURCE [FRAME] | error\n");
+    if (args.isEmpty() || ((args[0] == "av1" || args[0] == "keys") && args.size() < 3) ||
+        (args[0] == "vvc" && args.size() < 2) || !QStringList{"av1", "vvc", "error", "keys"}.contains(args[0])) {
+        std::fprintf(stderr, "usage: fgw_walkthrough av1 SOURCE ENCODE [OUTPUT.mkv] | vvc SOURCE [FRAME] | error | "
+                             "keys SOURCE ENCODE\n");
         return 2;
     }
     QSettings* settings = make_settings(&app);
@@ -388,6 +486,8 @@ int main(int argc, char* argv[]) {
         walk.av1(args[1], args[2], args.value(3));
     } else if (args[0] == "vvc") {
         walk.vvc(args[1], args.size() > 2 ? args[2].toLongLong() : -1);
+    } else if (args[0] == "keys") {
+        walk.keys(args[1], args[2]);
     } else {
         walk.error();
     }

@@ -97,6 +97,7 @@ std::optional<double> earliest_time(std::string_view csv) {
     std::optional<double> earliest;
     std::istringstream lines{std::string(csv)};
     for (std::string word; lines >> word;) {
+        word.erase(std::min(word.size(), word.find(',')));  // MPEG-TS packets add a side-data field: "2.358,"
         if (const std::optional<double> value = to_double(word)) {
             earliest = earliest ? std::min(*earliest, *value) : *value;
         }
@@ -164,6 +165,15 @@ VideoInfo parse_probe(const std::filesystem::path& path, const json& data, doubl
     if (duration <= 0) {
         throw ToolError(file_name(path) + ": duration unknown");
     }
+    // MPEG-TS has no duration of its own: ffprobe estimates it from the
+    // stream's start_time, its first packet's in decode order, which with
+    // B-pictures is later than the first frame shown (a 2 s VVenC .ts read
+    // as 1.04 s, so half its frames could not be reached).
+    if (text_of(format_section, "format_name") == "mpegts") {
+        if (const std::optional<double> start = to_double(text_of(s, "start_time")); start && *start > first_pts) {
+            duration += *start - first_pts;
+        }
+    }
 
     VideoInfo info;
     info.path = path;
@@ -226,10 +236,10 @@ VideoInfo probe(const std::filesystem::path& path, const std::string& ffprobe, C
     if (data.is_discarded()) {
         throw ToolError(file_name(path) + ": ffprobe's answer could not be read");
     }
-    // The stream's index first, for the packet times.
-    VideoInfo info = parse_probe(path, data, 0.0);
-    info.first_pts = first_presentation_time(ffprobe, path, info.stream_index, cancel);
-    return info;
+    // The stream's index first, for the packet times; then everything with
+    // them (an MPEG-TS duration depends on the first time).
+    const int stream = parse_probe(path, data, 0.0).stream_index;
+    return parse_probe(path, data, first_presentation_time(ffprobe, path, stream, cancel));
 }
 
 }  // namespace fgw

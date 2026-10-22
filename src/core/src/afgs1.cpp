@@ -127,7 +127,7 @@ BitWriter film_grain_params_bits(const GrainParams& p, const PictureFormat& form
     const int luma_count = luma_ar_coefficient_count(p.ar_coeff_lag);
     const int chroma_count = p.chroma_ar_coefficient_count();
     if (!p.y_points.empty()) {
-        write_ar(w, resized(p.ar_coeffs_y, std::min<int>(luma_count, static_cast<int>(p.ar_coeffs_y.size()))));
+        write_ar(w, resized(p.ar_coeffs_y, luma_count));  // validate() made sure there are that many
     }
     if (from_luma || cb_points != nullptr) {
         write_ar(w, resized(p.ar_coeffs_cb, chroma_count));

@@ -80,6 +80,9 @@ TEST(Probe, ReadsFfprobesAnswersAndBuildsCommandsAsPython) {
                   c.at("command_plain").get<std::vector<std::string>>());
         EXPECT_EQ(frame_index(info, 1.5), c.at("frame_index_1_5").get<std::int64_t>());
     }
+    // MPEG-TS packets carry side data: ffprobe's CSV lines end in a comma.
+    // The Python app read none of them, so a VVC .ts did not open.
+    EXPECT_EQ(earliest_time("2.400000,\n2.358000,\n2.441000,\n"), 2.358);
     for (const json& c : reference.at("probe").at("crops")) {
         VideoInfo source;
         source.width = c.at("source").at(0);

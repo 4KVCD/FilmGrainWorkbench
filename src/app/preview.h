@@ -36,22 +36,29 @@ public:
     QImage image() const;
     bool has(View view) const { return images_.contains(view); }
 
-    // A new frame's pictures. Keeps the view shown when the frame has it.
+    // A new frame's pictures. Shows the view chosen last when the frame has
+    // it, else keeps the one shown, else the encode.
     void set_images(std::map<View, QImage> images, QString caption);
-    // Adds or replaces some of the frame's pictures (null images remove them).
+    // Adds or replaces some of the frame's pictures (null images remove
+    // them), choosing the view as set_images does.
     void update_images(const std::map<View, QImage>& images);
     // No pictures; `placeholder` is shown instead.
     void clear(QString placeholder);
-    // Shows `view`; false if the frame has no such picture.
+    // Shows `view`; false if the frame has no such picture yet (it is shown
+    // once one comes).
     bool set_mode(View view);
 
 signals:
     void changed();
 
 private:
+    void pick_mode();
+
     ViewNames names_;
     std::map<View, QImage> images_;
-    View mode_ = encoded_view;
+    View mode_ = encoded_view;    // shown
+    View wanted_ = encoded_view;  // chosen last
+
     QString caption_;
     QString placeholder_;
 };
@@ -105,7 +112,11 @@ class ViewerWindow : public QWidget {
 public:
     explicit ViewerWindow(PreviewState* state, QWidget* parent = nullptr);
     FrameView* view() const { return view_; }
-    // Opens at 100 % if the frame fits on screen, otherwise as large as sensible.
+    // Where it was last (saveGeometry): it opens there.
+    void restore_place(const QByteArray& geometry) { placed_ = restoreGeometry(geometry); }
+    // Shows the window: the first time, unless a place was restored, sized
+    // to the frame (up to 90 % of the screen); then where it was left. The
+    // frame at 100 % if it fits, else fitted.
     void show_sized();
 
 private:
@@ -113,6 +124,7 @@ private:
 
     PreviewState* state_;
     FrameView* view_;
+    bool placed_ = false;  // has a size and place of its own
 };
 
 }  // namespace fgw::app

@@ -2,8 +2,13 @@
 
 #include <cmath>
 
+#include <QAbstractSlider>
+#include <QAbstractSpinBox>
+#include <QApplication>
 #include <QButtonGroup>
+#include <QComboBox>
 #include <QHBoxLayout>
+#include <QKeyEvent>
 #include <QKeySequence>
 #include <QSizePolicy>
 #include <QStatusBar>
@@ -38,8 +43,44 @@ QImage grain_only_image(const Plane& clean, const Plane& grained, int bit_depth)
     return image;
 }
 
+namespace {
+
+// ←, →, PgUp and PgDn belong to a focused slider, spin box or list. Those
+// do not claim the keys ahead of the window's shortcuts (a widget does so by
+// accepting ShortcutOverride, as a text field does for its keys), so this
+// claims them for them: after clicking the strength slider, ← moves it.
+class EditingKeys : public QObject {
+public:
+    using QObject::QObject;
+
+protected:
+    bool eventFilter(QObject* watched, QEvent* event) override {
+        if (event->type() == QEvent::ShortcutOverride &&
+            (qobject_cast<QAbstractSlider*>(watched) || qobject_cast<QAbstractSpinBox*>(watched) ||
+             qobject_cast<QComboBox*>(watched))) {
+            const int key = static_cast<QKeyEvent*>(event)->key();
+            if (key == Qt::Key_Left || key == Qt::Key_Right || key == Qt::Key_PageUp || key == Qt::Key_PageDown) {
+                event->accept();  // the key goes to the widget, not to a shortcut
+            }
+        }
+        return false;
+    }
+};
+
+void claim_editing_keys() {
+    static EditingKeys* const filter = [] {
+        auto* keys = new EditingKeys(qApp);
+        qApp->installEventFilter(keys);
+        return keys;
+    }();
+    static_cast<void>(filter);
+}
+
+}  // namespace
+
 std::vector<QShortcut*> install_viewer_shortcuts(QWidget* widget, FrameView* view, std::function<void(View)> set_mode,
                                                  std::function<void(int)> step, std::function<int()> second) {
+    claim_editing_keys();
     std::vector<QShortcut*> shortcuts;
     const auto add = [&](const QKeySequence& key, std::function<void()> action) {
         shortcuts.push_back(new QShortcut(key, widget, widget, std::move(action)));

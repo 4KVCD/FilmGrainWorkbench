@@ -81,11 +81,19 @@ std::string TimelineModel::to_json() const {
 
 TimelineModel TimelineModel::from_json(std::string_view text) {
     const json d = json::parse(text, nullptr, false);
-    // Version 2 models came from reads that could land on the wrong frame.
-    if (d.is_discarded() || !d.is_object() || d.value("kind", "") != "timeline" || d.value("version", 0) != 3) {
-        throw std::invalid_argument("not a grain model this version can read");
-    }
     try {
+        // Version 2 models came from reads that could land on the wrong frame.
+        if (d.is_discarded() || !d.is_object() || d.value("kind", "") != "timeline" || d.value("version", 0) != 3) {
+            throw std::invalid_argument("not a grain model this version can read");
+        }
+        // What the rest of the app divides by or shifts with (a file edited
+        // by hand, or damaged, must not reach a division by zero).
+        const int bit_depth = d.at("bit_depth").get<int>();
+        const json& fps_pair = d.at("fps");
+        if ((bit_depth != 8 && bit_depth != 10 && bit_depth != 12) || fps_pair.at(0).get<std::int64_t>() <= 0 ||
+            fps_pair.at(1).get<std::int64_t>() <= 0 || d.at("frames").get<std::int64_t>() <= 0) {
+            throw std::invalid_argument("a saved grain model has an impossible bit depth, frame rate or length");
+        }
         std::vector<Segment> segments;
         for (TableEntry& entry : parse_grain_table(d.at("table_in_frames").get<std::string>())) {
             segments.push_back({entry.start, entry.end, std::move(entry.params)});

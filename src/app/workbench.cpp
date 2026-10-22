@@ -68,10 +68,14 @@ void Workbench::log(const QString& text) {
 }
 
 void Workbench::tab_changed(int index) {
-    // Both pages use the same keys (arrows, 1-4, zoom); only the visible one answers them.
+    // Both pages use the same keys (arrows, 1-4, zoom) in this window; only
+    // the visible one answers them. A page's pop-out viewer is a window of
+    // its own: its keys stay on.
     for (int i = 0; i < tabs_->count(); ++i) {
         for (QShortcut* shortcut : tabs_->widget(i)->findChildren<QShortcut*>()) {
-            shortcut->setEnabled(i == index);
+            if (const auto* owner = qobject_cast<QWidget*>(shortcut->parent()); owner && owner->window() == this) {
+                shortcut->setEnabled(i == index);
+            }
         }
     }
     settings_->setValue("shell/tab", index);

@@ -207,12 +207,15 @@ QGroupBox* Av1Tab::videos_group() {
     pair_note_ = info_label();
     auto* offset_row = new QHBoxLayout;
     offset_spin_ = new QSpinBox;
-    offset_spin_->setRange(-100000, 100000);
+    // An encode cut from far into a long film (~200,000 frames) has an offset
+    // beyond Detect's reach: typed in, it must fit.
+    offset_spin_->setRange(-10'000'000, 10'000'000);
     offset_spin_->setToolTip("Encoded frame N shows source frame N + offset. Leave at 0 unless the encode was trimmed "
                              "or has extra frames.");
     connect(offset_spin_, &QSpinBox::valueChanged, this, [this] { offset_timer_.start(); });
     detect_button_ = new QPushButton("Detect");
-    detect_button_->setToolTip("Find the offset by matching frames at three places.");
+    detect_button_->setToolTip("Find the offset, up to ±48 frames, by matching frames at three places. A larger one "
+                               "(an encode cut from far into the film) is typed in.");
     connect(detect_button_, &QPushButton::clicked, this, &Av1Tab::detect_offset_clicked);
     offset_row->addWidget(offset_spin_, 1);
     offset_row->addWidget(detect_button_);
@@ -780,6 +783,11 @@ void Av1Tab::set_model(std::shared_ptr<const TimelineModel> model, const QString
         text += QString(" ⚠ %1 of %2 alignment checks matched a neighbouring frame better (check the offset).")
                     .arg(shifted).arg(m.alignment.size());
     }
+    const auto mismatched = std::count(m.alignment.begin(), m.alignment.end(), "mismatch");
+    if (mismatched) {
+        text += QString(" ⚠ %1 of %2 alignment checks found no matching frame (check the offset).")
+                    .arg(mismatched).arg(m.alignment.size());
+    }
     for (const std::string& warning : m.warnings) {
         text += " ⚠ " + qstring(warning);
     }
@@ -881,7 +889,14 @@ void Av1Tab::export_table() {
     for (std::size_t i = 0; i < entries.size(); ++i) {
         entries[i].params = plan_->params_at(model_->segments()[i].start).value_or(entries[i].params);
     }
-    std::ofstream(utf8_path(path.toStdString()), std::ios::binary) << format_grain_table(entries);
+    std::ofstream file(utf8_path(path.toStdString()), std::ios::binary);
+    file << format_grain_table(entries);
+    file.close();
+    if (!file) {
+        QMessageBox::warning(this, "Export grain table", "The table could not be written to " +
+                                                             QDir::toNativeSeparators(path) + ".");
+        return;
+    }
     log(QString("Exported grain table (%1 entries) to %2").arg(qstring(with_thousands(static_cast<std::int64_t>(entries.size()))), path));
 }
 
@@ -1015,7 +1030,7 @@ void Av1Tab::open_viewer_window() {
         viewer_window_ = new ViewerWindow(state_, this);
         install_shortcuts(viewer_window_);
         if (settings_->contains("av1/viewer_geometry")) {
-            viewer_window_->restoreGeometry(settings_->value("av1/viewer_geometry").toByteArray());
+            viewer_window_->restore_place(settings_->value("av1/viewer_geometry").toByteArray());
         }
     }
     viewer_window_->show_sized();

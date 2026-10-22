@@ -125,9 +125,12 @@ void Av1Tab::write() {
         return;
     }
     std::error_code error;
-    if (std::filesystem::exists(output, error) && std::filesystem::equivalent(output, encoded_->path, error)) {
-        QMessageBox::warning(this, "Output", "The output would overwrite the encode. Choose another name.");
-        return;
+    for (const VideoInfo* input : {&*encoded_, &*source_}) {
+        if (std::filesystem::exists(output, error) && std::filesystem::equivalent(output, input->path, error)) {
+            QMessageBox::warning(this, "Output", QString("The output would overwrite the %1. Choose another name.")
+                                                     .arg(input == &*encoded_ ? "encode" : "source"));
+            return;
+        }
     }
     if (std::filesystem::exists(output, error) &&
         QMessageBox::question(this, "Replace file?", QFileInfo(output_text).fileName() + " already exists. Replace it?") !=

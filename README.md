@@ -72,7 +72,9 @@ app next opens.
 ## AV1 grain into VVC
 
 1. **Videos.** Choose the source and the VVC encode made from it. *Detect*
-   finds the frame offset if the encode was trimmed.
+   finds the frame offset (up to ±48 frames) if the encode was trimmed; a
+   larger one, for an encode cut from far into the film, is typed in. Write
+   refuses to start when the frames do not match.
 2. **Preview and tune.** The grain of the frame shown is estimated as it
    loads. Luma and chroma strength scale it exactly; the grain is rendered with
    the same algorithm decoders use.

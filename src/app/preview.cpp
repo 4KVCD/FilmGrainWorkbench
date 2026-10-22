@@ -39,10 +39,17 @@ QImage PreviewState::image() const {
 void PreviewState::set_images(std::map<View, QImage> images, QString caption) {
     release_later(std::exchange(images_, std::move(images)));
     caption_ = std::move(caption);
-    if (!images_.contains(mode_)) {
+    pick_mode();
+    emit changed();
+}
+
+// The view chosen last when the frame has it; else the encode, else any.
+void PreviewState::pick_mode() {
+    if (images_.contains(wanted_)) {
+        mode_ = wanted_;
+    } else if (!images_.contains(mode_)) {
         mode_ = images_.contains(encoded_view) || images_.empty() ? encoded_view : images_.begin()->first;
     }
-    emit changed();
 }
 
 void PreviewState::update_images(const std::map<View, QImage>& images) {
@@ -57,6 +64,7 @@ void PreviewState::update_images(const std::map<View, QImage>& images) {
         }
     }
     release_later(std::move(replaced));
+    pick_mode();  // a view whose picture went away falls back; one chosen comes back with it
     emit changed();
 }
 
@@ -67,6 +75,7 @@ void PreviewState::clear(QString placeholder) {
 }
 
 bool PreviewState::set_mode(View view) {
+    wanted_ = view;  // shown as soon as the frame has it ("the grain appears once…")
     if (!images_.contains(view)) {
         return false;
     }
@@ -264,10 +273,11 @@ void ViewerWindow::update_title() {
 void ViewerWindow::show_sized() {
     const QRect screen = QGuiApplication::primaryScreen()->availableGeometry();
     const QImage image = state_->image();
-    if (!isVisible()) {
+    if (!placed_) {
         const QSize size = image.isNull() ? QSize(1280, 720) : image.size();
         resize(std::min(size.width(), static_cast<int>(screen.width() * 0.9)),
                std::min(size.height(), static_cast<int>(screen.height() * 0.9)));
+        placed_ = true;
     }
     show();
     raise();

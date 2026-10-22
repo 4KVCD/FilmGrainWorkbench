@@ -194,6 +194,7 @@ std::vector<double> packet_times(const std::string& ffprobe, const std::filesyst
         if (!line.empty() && line.back() == '\r') {
             line.pop_back();
         }
+        line.erase(std::min(line.size(), line.find(',')));  // MPEG-TS packets add a side-data field: "2.358,"
         if (!line.empty()) {
             times.push_back(line == "N/A" ? std::nan("") : std::stod(line));
         }

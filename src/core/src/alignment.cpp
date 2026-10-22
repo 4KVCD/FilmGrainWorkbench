@@ -12,7 +12,6 @@ namespace fgw {
 namespace {
 
 constexpr double match_margin_db = 1.0;  // the paired frame must beat its neighbours by this much
-constexpr double match_floor_db = 35.0;  // below this, a tie with the neighbours means nothing matches
 
 double mean(const std::vector<double>& values) {
     return values.empty() ? 0.0 : std::accumulate(values.begin(), values.end(), 0.0) / values.size();
@@ -41,6 +40,7 @@ std::string to_string(Alignment alignment) {
         case Alignment::ok: return "ok";
         case Alignment::shifted: return "shifted";
         case Alignment::unclear: return "unclear";
+        case Alignment::mismatch: return "mismatch";
     }
     return "unclear";
 }

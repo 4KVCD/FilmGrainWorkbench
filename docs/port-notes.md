@@ -45,10 +45,31 @@ on real files, then fixed (see the bug-check commit):
 - An encode Write cannot read (a raw .266, an MPEG-TS) failed only after
   the hours-long analysis; it is now refused at once.
 
-## Open
+## Second bug check
 
-- Write runs even when no place of the preflight matches (a wholly wrong
-  offset: every place "unclear" at a low PSNR). Refusing needs a threshold
-  for pixel PSNR on grainy film; to be decided.
-- A VVC encode in MPEG-TS does not load in the AV1 tab (the probe gives no
-  usable frame rate or duration).
+Found by a second review and by running the app, then fixed (see the
+second bug-check commit):
+
+- Export grain table at 0 % luma wrote an empty cY line no reader accepts.
+- Chroma scaled from luma lost its grain when tuned; it becomes explicit
+  chroma curves now (the same grain at 100 %, tested).
+- Write ran on a wholly wrong offset (every place "unclear"): places whose
+  frames do not match at all (block means below the 35 dB the frame-match
+  note uses) are "mismatch", and a majority of them with none "ok" stops it.
+- A VVC encode in MPEG-TS did not open (ffprobe's packet lines end in a
+  comma there), and its duration was read half as long (MPEG-TS durations
+  start at the first packet in decode order).
+- Switching tabs turned off the pop-out viewer's keys; ←, →, PgUp and PgDn
+  were taken from a focused slider, spin box or list.
+- The pop-out viewers did not reopen where they were left (the VVC one did
+  not save its place at all).
+- The view chosen went back to the encode when the grain pictures were
+  replaced (a new offset) and stayed there; it now returns with them.
+- The frame offset stopped at ±100,000 frames; Write's output could
+  overwrite the source; External programs did not take quoted paths;
+  Export grain table did not report a failed write; Check installation
+  named FFmpeg's version from the DLL's file name; without ffmpeg the AV1
+  viewer said nothing; a damaged saved analysis could divide by zero.
+- Dead code and conditions removed (an unreachable branch in the frame
+  estimate, a condition in scale_params, a misleading size in the AFGS1
+  writer), and libraries linked twice into the tests.

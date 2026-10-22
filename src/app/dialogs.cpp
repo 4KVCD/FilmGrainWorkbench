@@ -30,6 +30,15 @@ const std::map<std::string, QString> where_to_get = {
     {"ffmpeg", "Any recent build with VVC decoding (e.g. gyan.dev full build)."},
     {"ffprobe", "Comes with ffmpeg."}};
 
+// A path as typed or pasted: Explorer's "Copy as path" puts it in quotes.
+QString cleaned_path(const QLineEdit* edit) {
+    QString path = edit->text().trimmed();
+    if (path.size() >= 2 && path.startsWith('"') && path.endsWith('"')) {
+        path = path.mid(1, path.size() - 2);
+    }
+    return path;
+}
+
 }  // namespace
 
 ToolsDialog::ToolsDialog(const Tools& tools, QWidget* parent) : QDialog(parent) {
@@ -81,7 +90,7 @@ void ToolsDialog::browse(const std::string& name) {
 void ToolsDialog::find_automatically() {
     const Tools found = detect_tools();
     for (const auto& [name, edit] : edits_) {
-        if (!QFileInfo(edit->text()).isFile() && !found.path(name).empty()) {
+        if (!QFileInfo(cleaned_path(edit)).isFile() && !found.path(name).empty()) {
             edit->setText(QString::fromStdString(found.path(name)));
         }
     }
@@ -89,7 +98,7 @@ void ToolsDialog::find_automatically() {
 
 void ToolsDialog::refresh() {
     for (const auto& [name, edit] : edits_) {
-        const bool ok = QFileInfo(edit->text()).isFile();
+        const bool ok = QFileInfo(cleaned_path(edit)).isFile();
         states_.at(name)->setText(ok ? "✔ found" : "✖ missing");
         states_.at(name)->setStyleSheet(ok ? "color: #6fcf8f;" : "color: #ff7b72;");
     }
@@ -98,7 +107,7 @@ void ToolsDialog::refresh() {
 Tools ToolsDialog::tools() const {
     Tools tools;
     for (const auto& [name, edit] : edits_) {
-        tools.path(name) = edit->text().trimmed().toStdString();
+        tools.path(name) = QDir::toNativeSeparators(cleaned_path(edit)).toStdString();
     }
     return tools;
 }

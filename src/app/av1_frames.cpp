@@ -85,7 +85,11 @@ bool Av1Tab::same_videos(const std::string& source_path, const std::string& enco
 }
 
 void Av1Tab::request_frame(std::int64_t index) {
-    if (!encoded_ || !tools_.missing({"ffmpeg"}).empty() || shut_down_) {
+    if (!encoded_ || shut_down_) {
+        return;
+    }
+    if (!tools_.missing({"ffmpeg"}).empty()) {
+        state_->clear("Set up ffmpeg to see frames (Settings → External programs).");
         return;
     }
     if (running(frame_job_)) {

@@ -970,6 +970,9 @@ void VvcTab::open_viewer_window() {
     if (viewer_window_ == nullptr) {
         viewer_window_ = new ViewerWindow(state_, this);
         install_shortcuts(viewer_window_);
+        if (settings_->contains("vvc/viewer_geometry")) {
+            viewer_window_->restore_place(settings_->value("vvc/viewer_geometry").toByteArray());
+        }
     }
     viewer_window_->show_sized();
 }
@@ -987,6 +990,7 @@ void VvcTab::shutdown() {
         stop_for_good(job, 10000);
     }
     if (viewer_window_ != nullptr) {
+        settings_->setValue("vvc/viewer_geometry", viewer_window_->saveGeometry());
         viewer_window_->close();
     }
     retire_scene();

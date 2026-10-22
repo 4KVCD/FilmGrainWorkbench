@@ -6,8 +6,7 @@ add_executable(fgw_core_tests
     core/picture_test.cpp
     core/engine_test.cpp)
 target_compile_definitions(fgw_core_tests PRIVATE FGW_REFERENCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/reference")
-target_link_libraries(fgw_core_tests PRIVATE fgw_core fgw_platform nlohmann_json gtest gtest_main bcrypt
-                                             fgw_compile_options)
+target_link_libraries(fgw_core_tests PRIVATE fgw_core gtest gtest_main fgw_compile_options)
 fgw_copy_ffmpeg(fgw_core_tests)
 
 include(GoogleTest)
@@ -17,8 +16,9 @@ gtest_discover_tests(fgw_core_tests DISCOVERY_MODE PRE_TEST)
 # step's time and the longest the window did not answer. Built beside the app
 # to use its Qt DLLs. A developer tool, not a test and not shipped.
 if(FGW_BUILD_APP)
+    find_package(Qt6 REQUIRED COMPONENTS Test)  # real key presses (keys mode)
     add_executable(fgw_walkthrough tools/walkthrough.cpp)
-    target_link_libraries(fgw_walkthrough PRIVATE fgw_app fgw_compile_options)
+    target_link_libraries(fgw_walkthrough PRIVATE fgw_app Qt6::Test fgw_compile_options)
     set_target_properties(fgw_walkthrough PROPERTIES RUNTIME_OUTPUT_DIRECTORY $<TARGET_FILE_DIR:FilmGrainWorkbench>)
     add_dependencies(fgw_walkthrough FilmGrainWorkbench)
     # It runs offscreen (no window on the screen): Qt's offscreen platform
@@ -28,5 +28,6 @@ if(FGW_BUILD_APP)
     add_custom_command(TARGET fgw_walkthrough POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different ${fgw_qt_root}/../plugins/platforms/qoffscreen.dll
                 $<TARGET_FILE_DIR:fgw_walkthrough>/platforms/qoffscreen.dll
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:Qt6::Test> $<TARGET_FILE_DIR:fgw_walkthrough>
         VERBATIM)
 endif()

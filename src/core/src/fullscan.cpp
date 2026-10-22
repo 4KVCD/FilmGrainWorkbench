@@ -194,33 +194,46 @@ LumaImage quarter_luma(const Plane& luma) {
 Alignment check_place(const Tools& tools, const VideoInfo& source, const VideoInfo& encoded, std::int64_t offset,
                       const std::optional<Crop>& crop, std::int64_t place, CancelToken* cancel) {
     const Geometry geometry = geometry_of(encoded);
-    // Only a quarter-size luma of each frame is kept, not the frames (25 MB each at 4K).
-    const auto quarter_lumas = [&](const VideoInfo& info, std::int64_t index, const std::optional<Geometry>& target,
-                                   const std::optional<Crop>& frame_crop) {
-        std::vector<LumaImage> lumas;
-        std::vector<std::int64_t> indices = decode_frames(
-            tools.ffmpeg, info, index, preflight_frames, [&lumas](Frame& frame) { lumas.push_back(quarter_luma(frame.y)); },
-            cancel, target, frame_crop);
-        return std::pair{std::move(indices), std::move(lumas)};
+    // Of each frame only a quarter-size luma and its block means are kept,
+    // not the frame (25 MB at 4K).
+    struct Small {
+        LumaImage quarter;
+        LumaImage means;
     };
-    const auto [source_indices, source_lumas] = quarter_lumas(source, place + offset, geometry, crop);
-    std::map<std::int64_t, const LumaImage*> source_by_index;
-    for (std::size_t k = 0; k < source_lumas.size(); ++k) {
-        source_by_index.emplace(source_indices[k] - offset, &source_lumas[k]);
+    const auto small_frames = [&](const VideoInfo& info, std::int64_t index, const std::optional<Geometry>& target,
+                                  const std::optional<Crop>& frame_crop) {
+        std::vector<Small> frames;
+        std::vector<std::int64_t> indices = decode_frames(
+            tools.ffmpeg, info, index, preflight_frames,
+            [&frames](Frame& frame) { frames.push_back({quarter_luma(frame.y), block_means(frame.y)}); }, cancel,
+            target, frame_crop);
+        return std::pair{std::move(indices), std::move(frames)};
+    };
+    const auto [source_indices, source_frames] = small_frames(source, place + offset, geometry, crop);
+    std::map<std::int64_t, const Small*> source_by_index;
+    for (std::size_t k = 0; k < source_frames.size(); ++k) {
+        source_by_index.emplace(source_indices[k] - offset, &source_frames[k]);
     }
-    const auto [encoded_indices, encoded_lumas] = quarter_lumas(encoded, place, std::nullopt, std::nullopt);
+    const auto [encoded_indices, encoded_frames] = small_frames(encoded, place, std::nullopt, std::nullopt);
+    const double peak = static_cast<double>((1 << geometry.bit_depth) - 1);
     std::vector<LumaImage> source_run;
     std::vector<LumaImage> encoded_run;
-    for (std::size_t k = 0; k < encoded_lumas.size(); ++k) {
+    double means_db = 0;
+    for (std::size_t k = 0; k < encoded_frames.size(); ++k) {
         if (const auto paired = source_by_index.find(encoded_indices[k]); paired != source_by_index.end()) {
-            source_run.push_back(*paired->second);
-            encoded_run.push_back(encoded_lumas[k]);
+            source_run.push_back(paired->second->quarter);
+            encoded_run.push_back(encoded_frames[k].quarter);
+            means_db += psnr(paired->second->means, encoded_frames[k].means, peak);
         }
     }
     if (source_run.size() < 3) {
         return Alignment::unclear;
     }
-    return check_alignment(source_run, encoded_run, static_cast<double>((1 << geometry.bit_depth) - 1)).second;
+    const Alignment alignment = check_alignment(source_run, encoded_run, peak).second;
+    if (alignment == Alignment::unclear && means_db / static_cast<double>(source_run.size()) < match_floor_db) {
+        return Alignment::mismatch;  // the neighbours tie because no frame matches
+    }
+    return alignment;
 }
 
 // Checks frame-accurate pairing at several places before hours of work.
@@ -264,6 +277,14 @@ std::vector<std::string> preflight_alignment(const Tools& tools, const VideoInfo
                                         "match neighbouring frames better). Use Detect to set the frame offset, then "
                                         "start again.",
                                         shifted, verdicts.size()));
+    }
+    // A wholly wrong offset: the frames tie with their neighbours because no
+    // frame matches at all, which reads as "unclear", not "shifted".
+    const int mismatched = count("mismatch");
+    if (mismatched * 2 > static_cast<int>(verdicts.size()) && count("ok") == 0) {
+        throw std::runtime_error(format("Source and encode frames do not match at %d of %zu places checked: the frame "
+                                        "offset looks wrong. Use Detect to set it, then start again.",
+                                        mismatched, verdicts.size()));
     }
     return verdicts;
 }
@@ -515,13 +536,9 @@ GrainParams estimate_frame(const Frame& source, const Frame& encoded, CancelToke
               "--bit-depth", std::to_string(g.bit_depth), "--chroma", chroma_name(g), "--threads", "1", "--output",
               utf8(table)},
              cancel, options);
-    const std::vector<TableEntry> entries = parse_grain_table(read_text_file(table));
-    if (entries.empty()) {
-        GrainParams none;
-        none.apply_grain = false;
-        return none;
-    }
-    return entries.front().params;
+    // The analyzer always writes one entry (apply_grain 0 when nothing could be
+    // measured); a table without one fails to parse.
+    return parse_grain_table(read_text_file(table)).front().params;
 }
 
 }  // namespace fgw

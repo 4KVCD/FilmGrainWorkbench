@@ -3,6 +3,13 @@
 #include <chrono>
 #include <sstream>
 
+#include <windows.h>
+
+extern "C" {
+#include <libavformat/avformat.h>
+#include <libavutil/avutil.h>
+}
+
 #include "fgw/fullscan.h"
 #include "fgw/text.h"
 
@@ -99,11 +106,21 @@ std::vector<ProgramCheck> check_installation(const Tools& tools, const VvcTools&
                     return help.ok && help.text.starts_with("usage") ? Answer{true, "runs"} : Answer{false, help.text};
                 }),
     };
-    // The FFmpeg libraries the app reads encodes with when writing.
-    const std::filesystem::path libraries = app_dir() / "avformat-63.dll";
-    const bool present = std::filesystem::is_regular_file(libraries);
-    checks.push_back({"FFmpeg libraries", "read the encode when writing (AV1 tab)", present ? utf8(libraries) : "",
-                      present ? "libavformat 63 (FFmpeg 9.0.2)" : "not found", present});
+    // The FFmpeg libraries the app reads encodes with when writing: loaded
+    // with the app (it does not start without them), so asked directly which
+    // file and version they are (they can be replaced, LGPL).
+    std::string library_path;
+    if (const HMODULE module = GetModuleHandleW(L"avformat-63.dll")) {
+        wchar_t name[MAX_PATH];
+        if (const DWORD length = GetModuleFileNameW(module, name, MAX_PATH); length > 0 && length < MAX_PATH) {
+            library_path = utf8(std::filesystem::path(std::wstring(name, length)));
+        }
+    }
+    const unsigned libavformat = avformat_version();
+    checks.push_back({"FFmpeg libraries", "read the encode when writing (AV1 tab)", library_path,
+                      format("libavformat %u.%u.%u (FFmpeg %s)", AV_VERSION_MAJOR(libavformat),
+                             AV_VERSION_MINOR(libavformat), AV_VERSION_MICRO(libavformat), av_version_info()),
+                      true});
     return checks;
 }
 
