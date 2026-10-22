@@ -55,7 +55,7 @@ VvcTab::VvcTab(QSettings* settings, const std::filesystem::path& work_parent, QW
       tools_(load_tools(*settings)),
       vvc_tools_(find_vvc_tools()),
       work_(std::make_unique<WorkFolder>(work_parent)),
-      state_(new PreviewState(view_names, this)) {
+      state_(new PreviewState(view_names, "Choose a source video to see frames.", this)) {
     setWindowTitle("VVC Grain Analyzer — VVenC film grain analysis + vvdec synthesis");
     build();
     restore();
@@ -321,7 +321,7 @@ void VvcTab::load_source() {
     probing_ = path;
     if (path.isEmpty()) {
         source_info_->clear();
-        state_->clear("Choose a source video.");
+        state_->clear("Choose a source video to see frames.");
         return;
     }
     if (const std::vector<std::string> missing = tools_.missing({"ffmpeg", "ffprobe"}); !missing.empty()) {

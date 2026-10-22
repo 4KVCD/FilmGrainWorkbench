@@ -113,7 +113,7 @@ void FrameCache::drop_source_frames() {
 // ---------------------------------------------------------------- the tab
 
 Av1Tab::Av1Tab(QSettings* settings, QString data_dir, QWidget* parent)
-    : QMainWindow(parent), settings_(settings), data_dir_(std::move(data_dir)), state_(new PreviewState(view_names, this)) {
+    : QMainWindow(parent), settings_(settings), data_dir_(std::move(data_dir)), state_(new PreviewState(view_names, "Choose a source and an encoded video to see frames.", this)) {
     setWindowTitle(app_title);
     migrate_settings(*settings_);
     tools_ = load_tools(*settings_);

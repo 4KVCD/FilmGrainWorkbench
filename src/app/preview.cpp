@@ -26,8 +26,8 @@ const QColor background(12, 14, 16);
 
 // ---------------------------------------------------------------- PreviewState
 
-PreviewState::PreviewState(ViewNames names, QObject* parent)
-    : QObject(parent), names_(std::move(names)), placeholder_("Choose a source and an encoded video to see frames.") {}
+PreviewState::PreviewState(ViewNames names, QString placeholder, QObject* parent)
+    : QObject(parent), names_(std::move(names)), placeholder_(std::move(placeholder)) {}
 
 QImage PreviewState::image() const {
     const auto found = images_.find(mode_);

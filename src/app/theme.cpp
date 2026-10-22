@@ -34,6 +34,7 @@ QPalette dark_palette() {
         {QPalette::ToolTipBase, QColor(50, 55, 61)},
         {QPalette::ToolTipText, text},
         {QPalette::Text, text},
+        {QPalette::PlaceholderText, QColor(128, 136, 144)},  // the hint in an empty field: left unset, it is near black
         {QPalette::Button, QColor(48, 53, 59)},
         {QPalette::ButtonText, text},
         {QPalette::Highlight, QColor(61, 110, 168)},

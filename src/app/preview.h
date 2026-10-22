@@ -25,7 +25,8 @@ class PreviewState : public QObject {
     Q_OBJECT
 
 public:
-    explicit PreviewState(ViewNames names, QObject* parent = nullptr);
+    // `placeholder`: what the view says before there is a frame.
+    PreviewState(ViewNames names, QString placeholder, QObject* parent = nullptr);
 
     const ViewNames& names() const { return names_; }
     const std::map<View, QImage>& images() const { return images_; }
