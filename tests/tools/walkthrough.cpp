@@ -6,6 +6,7 @@
 //   fgw_walkthrough vvc SOURCE [FRAME]               browse, encode a scene, show every view
 //   fgw_walkthrough error                            an error in a slot is reported, not fatal
 //   fgw_walkthrough keys SOURCE ENCODE               the frame keys against sliders, spin boxes, viewer
+//   fgw_walkthrough screenshots FOLDER               each tab as it opens, as PNG (docs/screenshots)
 //
 // A small pair that writes in seconds (49 frames of noisy test pattern, the
 // encode with audio and subtitles), into tests\.cache:
@@ -365,6 +366,21 @@ struct Walkthrough {
         report("the app carries on", window.isVisible() && window.vvc()->isVisible());
     }
 
+    // The window as it opens, each tab, saved as PNG for the README: no
+    // video, so the pictures show no frame of anyone's film.
+    void screenshots(const QString& folder) {
+        const std::pair<Workbench::Tab, const char*> tabs[] = {{Workbench::vvc_tab, "vvc-tab.png"},
+                                                               {Workbench::av1_tab, "av1-tab.png"}};
+        for (const auto& [tab, file] : tabs) {
+            begin();
+            window.show_tab(tab);
+            wait([] { return false; }, 0.5);
+            const QString path = QDir(folder).filePath(file);
+            const QPixmap picture = window.grab();
+            report("screenshot", picture.save(path), QString("%1 (%2×%3)").arg(path).arg(picture.width()).arg(picture.height()));
+        }
+    }
+
     // Real key presses (Qt Test goes through the shortcut map as a keyboard
     // does): the frame keys leave a focused slider or spin box its own keys,
     // and a pop-out viewer keeps its keys when the other tab is shown.
@@ -460,8 +476,12 @@ int main(int argc, char* argv[]) {
     delete_old_profiles();
     QTemporaryDir profile(QDir::tempPath() + "/fgw-walkthrough-XXXXXX");
     qputenv("FGW_PROFILE", profile.path().toLocal8Bit());
+    // Screenshots are drawn with Windows' own fonts, by a window that is
+    // laid out but never put on the screen (WA_DontShowOnScreen below);
+    // the rest runs offscreen.
+    const bool screenshots = argc > 1 && std::string_view(argv[1]) == "screenshots";
     if (qEnvironmentVariableIsEmpty("QT_QPA_PLATFORM")) {
-        qputenv("QT_QPA_PLATFORM", "offscreen");  // nothing appears on the screen
+        qputenv("QT_QPA_PLATFORM", screenshots ? "windows" : "offscreen");
     }
     TimedApplication app(argc, argv);
     QApplication::setApplicationName(application_name);
@@ -470,14 +490,18 @@ int main(int argc, char* argv[]) {
     apply_theme(app);
     const QStringList args = QApplication::arguments().mid(1);
     if (args.isEmpty() || ((args[0] == "av1" || args[0] == "keys") && args.size() < 3) ||
-        (args[0] == "vvc" && args.size() < 2) || !QStringList{"av1", "vvc", "error", "keys"}.contains(args[0])) {
+        ((args[0] == "vvc" || args[0] == "screenshots") && args.size() < 2) ||
+        !QStringList{"av1", "vvc", "error", "keys", "screenshots"}.contains(args[0])) {
         std::fprintf(stderr, "usage: fgw_walkthrough av1 SOURCE ENCODE [OUTPUT.mkv] | vvc SOURCE [FRAME] | error | "
-                             "keys SOURCE ENCODE\n");
+                             "keys SOURCE ENCODE | screenshots FOLDER\n");
         return 2;
     }
     QSettings* settings = make_settings(&app);
     auto* window = new Workbench(settings);
     window->resize(1600, 1000);
+    if (screenshots) {
+        window->setAttribute(Qt::WA_DontShowOnScreen);
+    }
     window->show();
     app.set_window(window);
     Walkthrough walk{*window, app, {}, {}, 0};
@@ -488,6 +512,8 @@ int main(int argc, char* argv[]) {
         walk.vvc(args[1], args.size() > 2 ? args[2].toLongLong() : -1);
     } else if (args[0] == "keys") {
         walk.keys(args[1], args[2]);
+    } else if (args[0] == "screenshots") {
+        walk.screenshots(args[1]);
     } else {
         walk.error();
     }

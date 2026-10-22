@@ -16,6 +16,8 @@ AV1 film grain (AFGS1) metadata that players synthesise at playback.
   much grain VVenC removed and vvdec adds back, in numbers.
 - 4K HDR (PQ, HLG) sources, black bars found and cropped as an encode would.
 
+![The VVC grain analyzer tab: source, VVenC settings and the four views](docs/screenshots/vvc-tab.png)
+
 **AV1 grain into VVC (AFGS1)**
 - Measures the grain a VVC encode lost with libaom's own noise model, frame by
   frame, the way libaom's encoder does with `--denoise-noise-level`.
@@ -29,6 +31,8 @@ AV1 film grain (AFGS1) metadata that players synthesise at playback.
 - A whole-film analysis resumes where it stopped, and is reused once done.
 - Export the tuned grain as an AOM film grain table (aomenc, SVT-AV1
   `--fgs-table`).
+
+![The AV1 grain into VVC tab: videos, grain tuning and Write](docs/screenshots/av1-tab.png)
 
 **Built to stay responsive**
 - Everything slow (decoding, analysis, encoding, writing) runs off the
