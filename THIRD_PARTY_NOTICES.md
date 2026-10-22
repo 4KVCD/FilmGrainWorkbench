@@ -8,8 +8,8 @@ its own license; the license texts are in the `licenses` folder.
 
 | Program | What it is | License |
 |---|---|---|
-| `vvencapp.exe` | [VVenC](https://github.com/fraunhoferhhi/vvenc), Fraunhofer HHI, built from pull request 765 (commit 6b212fd) | BSD 3-Clause Clear (`VVenC-LICENSE.txt`) |
-| `vvdecapp.exe` | [vvdec](https://github.com/fraunhoferhhi/vvdec), Fraunhofer HHI, commit 6f6bb29 | BSD 3-Clause Clear (`vvdec-LICENSE.txt`) |
+| `vvencapp.exe` | [VVenC](https://github.com/fraunhoferhhi/vvenc), Fraunhofer HHI, built from pull request 765 (commit a9fc370) | BSD 3-Clause Clear (`VVenC-LICENSE.txt`) |
+| `vvdecapp.exe` | [vvdec](https://github.com/fraunhoferhhi/vvdec), Fraunhofer HHI, commit 6f6bb29 with pull request 450 (commit 4280979) | BSD 3-Clause Clear (`vvdec-LICENSE.txt`) |
 | `afgs1_grain_analyzer.exe` | This project's grain analyzer (`analyzer/`), linked with [libaom](https://aomedia.googlesource.com/aom) commit c8aad2b and, through GCC (MinGW-w64), the MinGW-w64 runtime and winpthreads | this project: MIT; libaom: BSD 2-Clause and the AOMedia Patent License 1.0 (`libaom-LICENSE.txt`, `libaom-PATENTS.txt`); MinGW-w64: `mingw-w64-runtime-COPYING.txt`, `mingw-w64-winpthreads-COPYING.txt` |
 
 ## Libraries of the app itself

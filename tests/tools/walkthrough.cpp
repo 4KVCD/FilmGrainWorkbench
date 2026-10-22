@@ -310,11 +310,18 @@ struct Walkthrough {
 
         begin();
         tab.encode_scene();
-        ok = wait([&] { return tab.state_->has(grain_view); }, 1800);
-        report("encode this scene: first mode shown", ok, tab.status_->label()->text().left(100));
+        // A failed encode stops the scene's work (stopped_) and says why in the viewer.
+        ok = wait([&] { return tab.state_->has(grain_view) || (idle() && tab.stopped_); }, 1800) &&
+             tab.state_->has(grain_view);
+        report("encode this scene: first mode shown", ok,
+               (ok ? tab.status_->label()->text() : tab.state_->placeholder().section('\n', 0, 2)).left(160));
+        if (!ok) {
+            return;
+        }
 
         begin();
-        ok = wait([&] { return idle() && tab.scene_ && tab.scene_->clips.size() == 3; }, 3600);
+        ok = wait([&] { return idle() && ((tab.scene_ && tab.scene_->clips.size() == 3) || tab.stopped_); }, 3600) &&
+             tab.scene_ && tab.scene_->clips.size() == 3;
         report("all three modes encoded", ok, tab.scene_label_->text().left(100));
 
         begin();

@@ -84,9 +84,11 @@ all three film grain analysis modes:
 Each mode writes an H.274 film grain characteristics SEI message; vvdec decodes
 every encode twice, without and with its grain synthesis. The selected mode is
 shown as soon as it is ready; the other two are encoded in the background, so
-switching modes is then instant. VVenC analyses the grain on the first picture
-of every GOP (32 frames); the pictures in between carry the latest parameters.
-Inside the encoded scene the views are:
+switching modes is then instant. VVenC analyses the grain once per GOP (32
+frames), switching to new parameters exactly at a scene cut, and writes the
+message only where the parameters change and at random access points; it
+persists, so the pictures in between keep the latest parameters. Inside the
+encoded scene the views are:
 
 1. **Source**: the source frame, cropped like the encode.
 2. **VVC, grain removed**: what VVenC coded (its MCTF pre-filter and the
@@ -174,7 +176,8 @@ first time.
   floating-point results match libaom's.
 - vvencapp and vvdecapp (`vvc/build_vvc_tools.ps1`) need Visual Studio 2022,
   CMake and git. VVenC is fraunhoferhhi/vvenc pull request 765, which includes
-  pull request 764; vvdec is its master branch.
+  pull request 764; vvdec is its master branch with pull request 450 (film
+  grain for 4:2:2, 4:4:4 and 4:0:0).
 - The app (`packaging/package.py`) builds with CMake; Qt's DLLs come from
   windeployqt, FFmpeg's LGPL libraries from `native/ffmpeg`.
 
