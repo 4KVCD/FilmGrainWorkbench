@@ -1,35 +1,68 @@
 # Film Grain Workbench
 
-See what happens to film grain in VVC, and put it back.
+See what VVC encoding does to a film's grain, compare VVenC's three film grain
+analysis modes side by side, and put the grain an encode lost back into it as
+AV1 film grain (AFGS1) metadata that players synthesise at playback.
 
-- **VVC grain analyzer (VVenC):** pick a scene of a film and see it three ways:
-  the source, the picture after VVenC removed the grain, and the picture with
-  vvdec's film grain synthesis added back, for each of VVenC's three film grain
-  analysis modes.
-- **AV1 grain into VVC (AFGS1):** measure the grain a VVC encode lost with
-  libaom's noise model, tune its strength on real frames, and write it into
-  the encode as **AFGS1** metadata (AV1 film grain carried in ITU-T T.35 SEI
-  messages), so players re-synthesise it at playback.
+## Features
 
-## Download and run
+**VVC grain analyzer (VVenC + vvdec)**
+- Pick any scene of a film and encode it with VVenC in all three film grain
+  analysis modes (`--fga 1`, `2`, `3`); the mode chosen shows first, the others
+  follow in the background.
+- Four views of every frame, switched with one key: the source, VVC with the
+  grain removed, VVC with vvdec's grain synthesis, and the grain alone.
+- The grain parameters each frame carries, read from the bitstream, with how
+  much grain VVenC removed and vvdec adds back, in numbers.
+- 4K HDR (PQ, HLG) sources, black bars found and cropped as an encode would.
 
-1. Download `FilmGrainWorkbench-<version>-win64.zip` from the Releases page and
-   unzip it anywhere.
-2. Run **Film Grain Workbench.exe**. Nothing is installed; delete the folder to
-   remove it.
-3. The app needs two free programs it does not include:
-   - **ffmpeg and ffprobe** with VVC decoding, FFmpeg 7.1 or newer
-     ([ffmpeg.org/download.html](https://ffmpeg.org/download.html), for example
-     the gyan.dev "full" build). The AV1 tab's *Verify* also needs an ffmpeg
-     that applies AFGS1 grain to VVC (9.0.1 does).
-   - **mkvmerge** from [MKVToolNix](https://mkvtoolnix.download/), only to write
-     MKVs in the AV1 tab.
+**AV1 grain into VVC (AFGS1)**
+- Measures the grain a VVC encode lost with libaom's own noise model, frame by
+  frame, the way libaom's encoder does with `--denoise-noise-level`.
+- A live preview: the grain of the frame shown is estimated as it loads, and
+  luma and chroma strength are tuned on real frames, rendered with the same
+  algorithm decoders use.
+- Writes every picture of the encode with its own AFGS1 parameters into a new
+  MKV, keeping audio, subtitles, chapters, attachments and HDR properties.
+- Verify decodes the written file with ffmpeg and checks it is bit-identical
+  to the preview.
+- A whole-film analysis resumes where it stopped, and is reused once done.
+- Export the tuned grain as an AOM film grain table (aomenc, SVT-AV1
+  `--fgs-table`).
 
-   The app finds them on `PATH`, in MKVToolNix's install folder, or in its own
-   `bin` folder; otherwise set them under *Settings → External programs*.
-   *Help → Check installation* lists what was found.
+**Built to stay responsive**
+- Everything slow (decoding, analysis, encoding, writing) runs off the
+  window's thread, and the long work at low priority: browsing a 4K film
+  stays smooth while VVenC encodes a scene on every core.
+- Native C++ and Qt; VVenC, vvdec and the grain analyzer are included.
 
-Windows 10 or 11, 64-bit. VVenC, vvdec and the grain analyzer are included.
+## Quick start
+
+1. Download `FilmGrainWorkbench-<version>-win64.zip` from
+   [Releases](../../releases) and unzip it anywhere. Nothing is installed;
+   delete the folder to remove it.
+2. Run **Film Grain Workbench.exe**.
+3. **VVC tab:** choose a source video, find a scene, press **E**. Switch views
+   with ← / → or 1-4.
+4. **AV1 tab:** choose the source and its VVC encode, tune the strength, press
+   *Write MKV with grain metadata*, then *Verify with ffmpeg*.
+
+## Requirements
+
+Windows 10 or 11, 64-bit. The app needs two free programs it does not
+include:
+
+- **ffmpeg and ffprobe** with VVC decoding, FFmpeg 7.1 or newer
+  ([ffmpeg.org/download.html](https://ffmpeg.org/download.html), for example
+  the gyan.dev "full" build). The AV1 tab's *Verify* also needs an ffmpeg that
+  applies AFGS1 grain to VVC (9.0.1 does).
+- **mkvmerge** from [MKVToolNix](https://mkvtoolnix.download/), only to write
+  MKVs in the AV1 tab.
+
+The app finds them on `PATH`, in MKVToolNix's install folder, or in its own
+`bin` folder; otherwise set them under *Settings → External programs*.
+*Help → Check installation* lists what was found. To see the written grain,
+a player must apply AFGS1 to VVC (ffmpeg-based players such as mpv).
 
 ## VVC grain analyzer
 
