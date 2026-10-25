@@ -40,6 +40,62 @@ AV1 film grain (AFGS1) metadata that players synthesise at playback.
   stays smooth while VVenC encodes a scene on every core.
 - Native C++ and Qt; VVenC, vvdec and the grain analyzer are included.
 
+## VVenC's film grain analysis modes
+
+The encode loses most of the grain (VVenC's MCTF pre-filter and the
+quantisation remove it). All three modes measure the source's grain once per
+GOP and describe it in a film grain characteristics (FGC) SEI message, so the
+decoder can add similar grain back. They differ in how they measure the
+grain and which grain model describes it. Modes 1 to 3 as included here come
+from VVenC pull requests
+[764](https://github.com/fraunhoferhhi/vvenc/pull/764) and
+[765](https://github.com/fraunhoferhhi/vvenc/pull/765), not merged yet.
+
+**`--fga 1`: VTM's analysis, ported and fixed.** A port of the reference
+encoder's analysis (VTM, JVET-AN0237) with seven of its bugs fixed (among
+them statistics that were never reset, swapped horizontal and vertical
+cut-offs, a truncated standard deviation, 4:2:0 chroma cut-offs not halved).
+It looks for grain in flat areas and describes it with H.274's **frequency
+filtering model**: a scaling function (grain strength by brightness) and
+horizontal and vertical cut-off frequencies (how fine or coarse the grain is).
+Its scaling factors are not calibrated against the synthesis: about right at
+1080p, too weak at 4K.
+
+**`--fga 2`: calibrated, same model.** The same frequency model, so any H.274
+decoder shows it, measured better: from the temporal residual (the frame
+against its motion-compensated neighbours, so picture detail is not taken for
+grain), with scaling factors calibrated against the synthesis, cut-offs
+fitted to the measured grain spectrum, a scaling function over the whole
+brightness range, and statistics that restart when the grain changes. The
+strength comes out right at every resolution, and clean video gets almost no
+grain added. The safe choice, and the app's default.
+
+**`--fga 3`: calibrated, auto-regressive model.** Measured like `--fga 2`,
+described with H.274's **auto-regressive (AR) model**: a small filter fitted
+to the measured grain spectrum, which reproduces grain shapes the cut-off
+model cannot. The grain texture is closest to the source on real film. Only
+decoders with the AR model show it: vvdec does; VTM's synthesis rejects it.
+
+| | Measures grain from | Strength | Model | Decoders |
+| --- | --- | --- | --- | --- |
+| `--fga 1` | flat areas of the picture | not calibrated (weak at 4K) | frequency | any H.274 |
+| `--fga 2` | the temporal residual | calibrated | frequency | any H.274 |
+| `--fga 3` | the temporal residual | calibrated | auto-regressive | vvdec (not VTM) |
+
+Measured on The Beekeeper at QP 28 (from the pull requests; grain level 1.00 =
+the source's, spectrum error lower = closer texture):
+
+| | `--fga 1` | `--fga 2` | `--fga 3` |
+| --- | --- | --- | --- |
+| Grain level, 1080p (3 scenes) | 0.94–0.99 | 0.97–1.00 | 0.95–0.98 |
+| Grain level, 4K | 0.61 | 0.95 | 0.94 |
+| Spectrum error, 1080p | 0.31–0.38 | 0.31–0.37 | 0.22–0.23 |
+| Spectrum error, 4K | 0.41 | 0.44 | 0.27 |
+
+In all three, the message is written only where the parameters change and at
+random access points, the parameters switch exactly at scene cuts, and the
+analysis costs at most about 2 % of encoding speed, within run-to-run noise.
+
 ## Quick start
 
 1. Download `FilmGrainWorkbench-<version>-win64.zip` from
@@ -73,13 +129,8 @@ a player must apply AFGS1 to VVC (ffmpeg-based players such as mpv).
 Choose a source video and browse it for a scene: only the source is decoded
 while you look. Black bars are found and cropped, as an encode would.
 *Encode this scene* (E) encodes the frames around the one shown with VVenC in
-all three film grain analysis modes:
-
-| Mode | Analysis |
-| --- | --- |
-| `--fga 1` | VTM's analysis (JVET-AN0237), frequency filtering model |
-| `--fga 2` | the same, with the grain measured from the temporal residual and calibrated scaling |
-| `--fga 3` | like 2, with the auto-regressive grain model (only some decoders, such as vvdec, synthesise it) |
+all three film grain analysis modes (see
+[VVenC's film grain analysis modes](#vvencs-film-grain-analysis-modes)).
 
 Each mode writes an H.274 film grain characteristics SEI message; vvdec decodes
 every encode twice, without and with its grain synthesis. The selected mode is
