@@ -7,6 +7,10 @@
 // background, so switching modes is instant. Inside that scene every view is
 // available, and a changed VVenC setting encodes the scene again.
 //
+// "Add the grain to your encode" (vvc_write.cpp) needs no encoding: VVenC
+// analyses the source's grain with the same settings and the app writes it
+// into the user's own VVC encode, one MKV per analysis mode.
+//
 // Temporary files: the tab keeps one scene (its source frames and the three
 // encodes, each decoded twice) in a folder of its own in %TEMP%, deletes
 // whatever is replaced as soon as nothing reads it, and the folder when it
@@ -38,6 +42,7 @@
 
 #include "fgw/display.h"
 #include "fgw/probe.h"
+#include "fgw/vvc_fga.h"
 #include "fgw/vvc_grain.h"
 #include "frame_pane.h"
 #include "job.h"
@@ -59,14 +64,18 @@ public:
     StatusBar& status() { return *status_; }
     const VvcTools& vvc_tools() const { return vvc_tools_; }
     // Nothing here needs asking before closing: a scene is quick to encode again.
-    bool can_close() const { return true; }
+    // Asks before a write is cancelled by closing.
+    bool can_close();
     // Stops the work and deletes the temporary files.
     void shutdown();
 
     // For tests: the tab's state.
     const std::optional<VideoInfo>& source() const { return source_; }
     const Scene* scene() const { return scene_.get(); }
-    bool busy() const { return running(job_) || running(frame_job_) || running(probe_job_); }
+    bool busy() const {
+        return running(job_) || running(frame_job_) || running(probe_job_) || running(write_job_) ||
+               running(encode_probe_job_);
+    }
     PreviewState* preview() const { return state_; }
     void encode_scene();
 
@@ -79,6 +88,7 @@ private:
     QGroupBox* source_group();
     QGroupBox* vvenc_group();
     QGroupBox* frame_group();
+    QGroupBox* write_group();
     void install_shortcuts(QWidget* widget);
     void update_tools_banner();
 
@@ -132,6 +142,18 @@ private:
     void render_clip(std::shared_ptr<const Clip> clip, std::int64_t index);
     void frame_job_ended();
     void update_scene_label();
+
+    // Adding the grain to an encode (vvc_write.cpp).
+    void browse_encode();
+    void browse_output();
+    void load_encode();
+    void update_write_controls();
+    std::filesystem::path output_for(int fga) const;
+    void start_write_job(const QString& name, Job::Work work);
+    void detect_offset();
+    void set_offset(int offset);
+    void write_or_cancel();
+    std::optional<QString> prepare_write();
 
     // View modes.
     void set_mode(View view);
@@ -191,6 +213,27 @@ private:
     QLabel* scene_label_ = nullptr;
     QLabel* tools_label_ = nullptr;
     QLabel* info_label_ = nullptr;
+
+    // Adding the grain to an encode.
+    std::optional<VideoInfo> encoded_;
+    QString probing_encode_;  // the path being probed
+    QPointer<Job> encode_probe_job_;
+    QPointer<Job> write_job_;  // offset detection or a write
+    QLineEdit* encode_edit_ = nullptr;
+    QPushButton* encode_browse_ = nullptr;
+    QLabel* encode_info_ = nullptr;
+    // The source frame shown by the encode's frame 0. Only Detect (or another pair, back to 0) changes it:
+    // a spin box here was changed by a stray mouse-wheel scroll.
+    int offset_ = 0;
+    QLabel* offset_label_ = nullptr;
+    QPushButton* detect_button_ = nullptr;
+    QCheckBox* write_checks_[3] = {};
+    QLineEdit* output_edit_ = nullptr;
+    QPushButton* output_browse_ = nullptr;
+    QString offset_pair_;  // source|encode the frame offset was set for
+    bool confirm_replace_ = true;  // ask before replacing files (the walkthrough does not)
+    QPushButton* write_button_ = nullptr;
+    QLabel* write_label_ = nullptr;
 };
 
 }  // namespace fgw::app

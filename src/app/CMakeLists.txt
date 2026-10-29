@@ -17,6 +17,7 @@ add_library(fgw_app STATIC
     theme.cpp
     vvc_scene.cpp
     vvc_tab.cpp
+    vvc_write.cpp
     workbench.cpp
     resources/app.qrc)
 target_include_directories(fgw_app PUBLIC .)

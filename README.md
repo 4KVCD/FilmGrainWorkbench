@@ -15,6 +15,9 @@ AV1 film grain (AFGS1) metadata that players synthesise at playback.
 - The grain parameters each frame carries, read from the bitstream, with how
   much grain VVenC removed and vvdec adds back, in numbers.
 - 4K HDR (PQ, HLG) sources, black bars found and cropped as an encode would.
+- Add VVenC's grain to your own VVC encode, without encoding: VVenC analyses
+  the source, and the app writes one MKV per analysis mode, the same pictures
+  with each mode's grain metadata.
 
 ![The VVC grain analyzer tab: source, VVenC settings and the four views](docs/screenshots/vvc-tab.png)
 
@@ -159,6 +162,29 @@ at 3840×1608 about 4.3 GB). Whatever is replaced is deleted as soon as nothing
 reads it, the folder when the app closes, and folders left by a crash when the
 app next opens.
 
+### Add the grain to your encode
+
+*Add the grain to your encode* puts VVenC's grain into a VVC encode you made
+(any encoder; MKV, MP4 or MOV), without encoding anything. VVenC analyses the
+source frames the encode shows, with the strength, QP and preset set above
+(the QP sets how much the analysis's filter smooths, as in an encode at that
+QP), in all three modes at once. The app then writes the encode once per
+chosen mode, as `<encode> - VVenC fga 1.mkv` and so on, in the output
+folder you choose (by default next to the encode): the
+encode's pictures, audio, subtitles and chapters unchanged, with that mode's
+film grain characteristics SEI messages where VVenC itself puts them (where
+the parameters change and at random access points). Grain metadata the encode
+had is replaced.
+
+The source is cropped to the encode's aspect ratio and scaled to its size, as
+for the AV1 grain, and analysed at the encode's bit depth and frame rate, as
+VVenC analyses what it encodes (an 8-bit encode at 8 bits; the scenes above
+are encoded at 10). The frame offset is the source frame the encode's first
+frame shows; *Detect* finds it for an encode of the whole film. The last
+analysis is kept (in the app's data folder, also after it closes): a write
+of the same encode with the same settings uses it again, after a failed or
+cancelled write too.
+
 ## AV1 grain into VVC
 
 1. **Videos.** Choose the source and the VVC encode made from it. *Detect*
@@ -227,8 +253,9 @@ first time.
   floating-point results match libaom's.
 - vvencapp and vvdecapp (`vvc/build_vvc_tools.ps1`) need Visual Studio 2022,
   CMake and git. VVenC is fraunhoferhhi/vvenc pull request 765, which includes
-  pull request 764; vvdec is its master branch with pull request 450 (film
-  grain for 4:2:2, 4:4:4 and 4:0:0).
+  pull request 764, plus `vvc/vvenc-fga-analysis-only.patch` (`--fga 4`: the
+  three modes' analyses without coding); vvdec is its master branch with pull
+  request 450 (film grain for 4:2:2, 4:4:4 and 4:0:0).
 - The app (`packaging/package.py`) builds with CMake; Qt's DLLs come from
   windeployqt, FFmpeg's LGPL libraries from `native/ffmpeg`.
 

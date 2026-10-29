@@ -75,4 +75,14 @@ inline bool running(const QPointer<Job>& job) { return job && !job->delivered_; 
 // cannot be): the app's exit ends it, and its programs with it.
 void stop_for_good(const QPointer<Job>& job, unsigned long wait_ms);
 
+// Keeps Windows awake on the thread that creates it, until it goes. Windows
+// tracks this per thread, so a job that runs for hours holds it itself.
+class KeepAwake {
+public:
+    KeepAwake() { keep_awake(true); }
+    ~KeepAwake() { keep_awake(false); }
+    KeepAwake(const KeepAwake&) = delete;
+    KeepAwake& operator=(const KeepAwake&) = delete;
+};
+
 }  // namespace fgw::app

@@ -4,6 +4,8 @@
 //
 //   fgw_walkthrough av1 SOURCE ENCODE [OUTPUT.mkv]   browse, retune; with OUTPUT also Write and Verify
 //   fgw_walkthrough vvc SOURCE [FRAME]               browse, encode a scene, show every view
+//   fgw_walkthrough vvcwrite SOURCE ENCODE [OFFSET]  detect the offset (or use OFFSET), add VVenC's grain to the
+//                                                    encode in all modes, into "walkthrough output" next to it
 //   fgw_walkthrough error                            an error in a slot is reported, not fatal
 //   fgw_walkthrough keys SOURCE ENCODE               the frame keys against sliders, spin boxes, viewer
 //   fgw_walkthrough screenshots FOLDER               each tab as it opens, as PNG (docs/screenshots)
@@ -286,6 +288,77 @@ struct Walkthrough {
         report("asked for frames, closing while they load", true);
     }
 
+    // The VVC tab's "Add the grain to your encode": the files land next to the encode.
+    void vvc_write(const QString& source, const QString& encode, const QString& offset) {
+        VvcTab& tab = *window.vvc();
+        window.show_tab(Workbench::vvc_tab);
+        close_message_boxes();
+        const auto idle = [&tab] { return !tab.busy() && !running(tab.write_job_) && !running(tab.encode_probe_job_); };
+
+        begin();
+        tab.source_edit_->setText(source);
+        tab.load_source();
+        tab.encode_edit_->setText(encode);
+        tab.load_encode();
+        bool ok = wait([&] { return idle() && tab.source_ && tab.encoded_; }, 300);
+        report("open the source and the encode", ok, tab.encode_info_->text().left(100));
+        if (!ok) {
+            return;
+        }
+
+        begin();
+        if (offset.isEmpty()) {
+            tab.detect_offset();
+            ok = wait([&] { return idle(); }, 600) && tab.write_label_->text().startsWith("Detected offset");
+            report("detect the offset", ok, tab.write_label_->text().left(100));
+        } else {
+            tab.set_offset(offset.toInt());  // Detect finds an excerpt's place only near the film's
+            report("set the offset", tab.offset_ == offset.toInt(), offset);
+        }
+
+        begin();
+        // into a folder of its own, which the write makes
+        const std::filesystem::path folder = tab.encoded_->path.parent_path() / "walkthrough output";
+        std::error_code ignored;
+        std::filesystem::remove_all(folder, ignored);
+        tab.output_edit_->setText(QString::fromStdWString(folder.wstring()));
+        tab.confirm_replace_ = false;  // the cancelled write below would replace the files
+        std::vector<std::filesystem::path> outputs;
+        for (const FgaMode& mode : fga_modes) {
+            outputs.push_back(tab.output_for(mode.value));
+        }
+        tab.write_or_cancel();
+        ok = wait([&] { return idle(); }, 36000) && tab.write_label_->text().startsWith("Analysed");
+        for (const std::filesystem::path& output : outputs) {
+            ok = ok && std::filesystem::is_regular_file(output);
+        }
+        report("write all three modes", ok, tab.write_label_->text().left(160));
+        if (!ok) {
+            return;
+        }
+
+        // Cancel a second write: every file is still there, and no temporary folder is left.
+        begin();
+        tab.write_or_cancel();
+        tab.write_or_cancel();  // at once: the job sees it before its next program, so it cannot finish first
+        ok = wait([&] { return idle(); }, 120) && tab.write_label_->text().startsWith("Cancelled.");
+        for (const std::filesystem::path& output : outputs) {
+            ok = ok && std::filesystem::is_regular_file(output);
+        }
+        std::size_t left = 0;
+        for (const auto& entry : std::filesystem::directory_iterator(folder)) {
+            left += entry.is_directory() ? 1 : 0;
+        }
+        report("cancel a write", ok && left == 0,
+               QString("%1 folders left; ").arg(left) + tab.write_label_->text().replace('\n', ' '));
+
+        // Write again: the kept analysis is used.
+        begin();
+        tab.write_or_cancel();
+        ok = wait([&] { return idle(); }, 36000) && tab.write_label_->text().startsWith("Used the kept analysis");
+        report("write again with the kept analysis", ok, tab.write_label_->text().section('\n', 0, 0).left(120));
+    }
+
     void vvc(const QString& source, std::int64_t frame) {
         VvcTab& tab = *window.vvc();
         window.show_tab(Workbench::vvc_tab);
@@ -498,9 +571,10 @@ int main(int argc, char* argv[]) {
     const QStringList args = QApplication::arguments().mid(1);
     if (args.isEmpty() || ((args[0] == "av1" || args[0] == "keys") && args.size() < 3) ||
         ((args[0] == "vvc" || args[0] == "screenshots") && args.size() < 2) ||
-        !QStringList{"av1", "vvc", "error", "keys", "screenshots"}.contains(args[0])) {
-        std::fprintf(stderr, "usage: fgw_walkthrough av1 SOURCE ENCODE [OUTPUT.mkv] | vvc SOURCE [FRAME] | error | "
-                             "keys SOURCE ENCODE | screenshots FOLDER\n");
+        (args[0] == "vvcwrite" && args.size() < 3) ||
+        !QStringList{"av1", "vvc", "vvcwrite", "error", "keys", "screenshots"}.contains(args[0])) {
+        std::fprintf(stderr, "usage: fgw_walkthrough av1 SOURCE ENCODE [OUTPUT.mkv] | vvc SOURCE [FRAME] | "
+                             "vvcwrite SOURCE ENCODE [OFFSET] | error | keys SOURCE ENCODE | screenshots FOLDER\n");
         return 2;
     }
     QSettings* settings = make_settings(&app);
@@ -517,6 +591,8 @@ int main(int argc, char* argv[]) {
         walk.av1(args[1], args[2], args.value(3));
     } else if (args[0] == "vvc") {
         walk.vvc(args[1], args.size() > 2 ? args[2].toLongLong() : -1);
+    } else if (args[0] == "vvcwrite") {
+        walk.vvc_write(args[1], args[2], args.value(3));
     } else if (args[0] == "keys") {
         walk.keys(args[1], args[2]);
     } else if (args[0] == "screenshots") {

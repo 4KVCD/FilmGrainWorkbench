@@ -5,10 +5,13 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <limits>
+#include <set>
 
 #include "fgw/display.h"
 #include "fgw/mkv_writer.h"
 #include "fgw/vvc.h"
+#include "fgw/vvc_fga.h"
 #include "reference.h"
 
 namespace fgw::test {
@@ -112,6 +115,92 @@ TEST(Vvc, PacketsSeiAndEscapingMatchPython) {
         EXPECT_EQ(to_hex(escaped), c.at("escaped").get<std::string>());
         EXPECT_EQ(to_hex(vvc::unescape_rbsp(escaped)), c.at("unescaped").get<std::string>());
     }
+}
+
+// Where the film grain SEI goes in an encode made elsewhere, as VVenC places it: the cases a VVenC encode of the
+// test clips does not have (RASL pictures with a message, a CRA after an end of sequence).
+TEST(VvcFga, PlacesTheMessagesAsVvenc) {
+    constexpr int trail = 0;
+    FgcPlacement placement;
+    EXPECT_TRUE(placement.needed(0, vvc::nal_idr_w_radl, false));  // a random access point
+    EXPECT_FALSE(placement.needed(8, trail, false));
+    EXPECT_TRUE(placement.needed(4, trail, true));                 // other parameters than frame 3
+    EXPECT_TRUE(placement.needed(32, vvc::nal_cra, false));
+    EXPECT_TRUE(placement.needed(30, vvc::nal_rasl, true));
+    EXPECT_TRUE(placement.needed(31, trail, false));               // after a RASL picture that had one
+    EXPECT_FALSE(placement.needed(33, trail, false));
+    // After an end of sequence a CRA starts a coded video sequence: its leading pictures need one again.
+    EXPECT_TRUE(placement.needed(40, vvc::nal_cra, false, true));
+    EXPECT_TRUE(placement.needed(38, vvc::nal_radl, false));
+    EXPECT_TRUE(placement.needed(64, vvc::nal_idr_w_radl, false));
+    EXPECT_TRUE(placement.needed(60, vvc::nal_radl, false));
+}
+
+// The encode's own film grain messages go, its other messages stay; an end of sequence is seen.
+TEST(VvcFga, ReplacesTheEncodesMessages) {
+    const auto packet_of = [](const std::vector<std::vector<std::uint8_t>>& nals) {
+        std::vector<std::uint8_t> packet;
+        for (const auto& nal : nals) {
+            const auto size = static_cast<std::uint32_t>(nal.size());
+            packet.insert(packet.end(), {static_cast<std::uint8_t>(size >> 24), static_cast<std::uint8_t>(size >> 16),
+                                         static_cast<std::uint8_t>(size >> 8), static_cast<std::uint8_t>(size)});
+            packet.insert(packet.end(), nal.begin(), nal.end());
+        }
+        return packet;
+    };
+    // a prefix SEI NAL unit with a film grain message and a user data message, then a slice
+    std::vector<std::uint8_t> sei = {0, vvc::nal_prefix_sei << 3 | 1, vvc::sei_film_grain_characteristics, 2, 0x11,
+                                     0x80, vvc::sei_user_data_unregistered, 1, 0x22, 0x80};
+    const std::vector<std::uint8_t> slice = {0, vvc::nal_cra << 3 | 1, 0x55};
+    const std::vector<std::uint8_t> packet = packet_of({sei, slice});
+    const vvc::Inserted stripped = vvc::insert_fgc(packet, 4, std::nullopt);
+    std::set<int> types = vvc::prefix_sei_types(stripped.packet, 4);
+    EXPECT_EQ(types, (std::set<int>{vvc::sei_user_data_unregistered}));
+    const std::vector<std::uint8_t> payload = {0x33, 0x80};
+    const vvc::Inserted replaced = vvc::insert_fgc(packet, 4, std::span<const std::uint8_t>(payload));
+    types = vvc::prefix_sei_types(replaced.packet, 4);
+    EXPECT_EQ(types, (std::set<int>{vvc::sei_film_grain_characteristics, vvc::sei_user_data_unregistered}));
+    EXPECT_EQ(vvc::packet_kind(packet, 4).picture_type, vvc::nal_cra);
+    EXPECT_FALSE(vvc::packet_kind(packet, 4).ends_sequence);
+    const std::vector<std::uint8_t> end = {0, vvc::nal_end_of_sequence << 3 | 1};
+    EXPECT_TRUE(vvc::packet_kind(packet_of({slice, end}), 4).ends_sequence);
+}
+
+// What vvencapp --fga 4 writes: per mode, a marker (the mode and the first frame) and the parameter set after it.
+TEST(VvcFga, ReadsTheAnalysisAndKeepsItsSetsAsVvenc) {
+    const std::vector<std::uint8_t> uuid = {0x39, 0x3c, 0xc8, 0x18, 0x0a, 0x4b, 0x4c, 0xef,
+                                            0x8e, 0x2d, 0xf1, 0x60, 0x5b, 0x95, 0x77, 0xc0};
+    std::vector<std::uint8_t> stream;
+    const auto add_nal = [&](int type, const std::vector<std::uint8_t>& payload) {
+        stream.insert(stream.end(), {0, 0, 0, 1});
+        const std::vector<std::uint8_t> nal = vvc::sei_nal(type, payload, 0, 1);
+        stream.insert(stream.end(), nal.begin(), nal.end());
+    };
+    const auto marker = [&](int mode, std::int32_t poc) {
+        std::vector<std::uint8_t> data = uuid;
+        const auto bits = static_cast<std::uint32_t>(poc);
+        data.insert(data.end(), {static_cast<std::uint8_t>(mode), static_cast<std::uint8_t>(bits >> 24),
+                                 static_cast<std::uint8_t>(bits >> 16), static_cast<std::uint8_t>(bits >> 8),
+                                 static_cast<std::uint8_t>(bits)});
+        add_nal(vvc::sei_user_data_unregistered, data);
+    };
+    for (const int mode : {1, 2, 3}) {
+        marker(mode, std::numeric_limits<std::int32_t>::min());
+        add_nal(vvc::sei_film_grain_characteristics, {static_cast<std::uint8_t>(mode), 0x80});
+    }
+    marker(2, 32);
+    add_nal(vvc::sei_film_grain_characteristics, {0x22, 0x80});
+    marker(1, 40);  // a marker without its set: nothing
+    FgaSegments segments = read_fga_segments(stream);
+    EXPECT_EQ(segments.payload_at(1, 100), (std::vector<std::uint8_t>{1, 0x80}));
+    EXPECT_EQ(segments.payload_at(2, -5), (std::vector<std::uint8_t>{2, 0x80}));
+    EXPECT_EQ(segments.payload_at(2, 31), (std::vector<std::uint8_t>{2, 0x80}));
+    EXPECT_EQ(segments.payload_at(2, 32), (std::vector<std::uint8_t>{0x22, 0x80}));
+    // A set from an earlier frame replaces the later ones, as VVenC keeps its sets.
+    segments.add(2, 64, {0x64});
+    segments.add(2, 48, {0x48});
+    EXPECT_EQ(segments.payload_at(2, 70), (std::vector<std::uint8_t>{0x48}));
+    EXPECT_THROW(read_fga_segments(std::vector<std::uint8_t>(stream.begin(), stream.begin() + 10)), std::invalid_argument);
 }
 
 TEST(MatroskaWriter, WritesTheSameBytesAsPython) {

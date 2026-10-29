@@ -1,8 +1,8 @@
-// H.266 (VVC) NAL units: inserting AFGS1 prefix SEI messages into the
-// length-prefixed packets of Matroska and MP4, and the SEI messages of Annex B
-// streams.
+// H.266 (VVC) NAL units: inserting grain metadata (AFGS1 or film grain
+// characteristics) as prefix SEI messages into the length-prefixed packets of
+// Matroska and MP4, and the SEI messages of Annex B streams.
 //
-// Each packet is one access unit. The AFGS1 message goes into a prefix SEI NAL
+// Each packet is one access unit. The message goes into a prefix SEI NAL
 // unit of its own, after any AUD, parameter sets and existing prefix SEIs and
 // before the picture header or first slice, with that picture's nuh_layer_id
 // and TemporalId, as H.266 section 7.4.2.2 requires for SEI NAL units.
@@ -18,9 +18,20 @@ namespace fgw::vvc {
 
 using Bytes = std::vector<std::uint8_t>;
 
+inline constexpr int nal_radl = 2;
+inline constexpr int nal_rasl = 3;
+inline constexpr int nal_idr_w_radl = 7;
+inline constexpr int nal_idr_n_lp = 8;
+inline constexpr int nal_cra = 9;
+inline constexpr int nal_gdr = 10;
+inline constexpr int nal_sps = 15;
 inline constexpr int nal_picture_header = 19;
+inline constexpr int nal_end_of_sequence = 21;
+inline constexpr int nal_end_of_bitstream = 22;
 inline constexpr int nal_prefix_sei = 23;
 inline constexpr int sei_user_data_registered_t35 = 4;
+inline constexpr int sei_user_data_unregistered = 5;
+inline constexpr int sei_film_grain_characteristics = 19;
 inline constexpr int sei_mastering_display = 137;
 inline constexpr int sei_content_light_level = 144;
 
@@ -60,6 +71,20 @@ struct Inserted {
 // The packet with one AFGS1 prefix SEI holding `t35_payload` (replacing any
 // AFGS1 messages it had).
 Inserted insert_t35(std::span<const std::uint8_t> packet, int length_size, std::span<const std::uint8_t> t35_payload);
+
+// What a packet holds: the NAL unit type of its first slice (nothing
+// without a slice), and whether it ends a coded video sequence (an end of
+// sequence or end of bitstream NAL unit), so that the next picture starts one.
+struct PacketKind {
+    std::optional<int> picture_type;
+    bool ends_sequence = false;
+};
+PacketKind packet_kind(std::span<const std::uint8_t> packet, int length_size);
+
+// The packet without its film grain characteristics messages, and with one
+// holding `payload` if there is one.
+Inserted insert_fgc(std::span<const std::uint8_t> packet, int length_size,
+                    std::optional<std::span<const std::uint8_t>> payload);
 
 // The payload types of the packet's prefix SEI messages.
 std::set<int> prefix_sei_types(std::span<const std::uint8_t> packet, int length_size);

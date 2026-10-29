@@ -84,6 +84,7 @@ void VvcTab::build() {
     side->addWidget(source_group());
     side->addWidget(vvenc_group());
     side->addWidget(frame_group());
+    side->addWidget(write_group());
     side->addStretch(1);
 
     auto* scroll = new QScrollArea;
@@ -257,6 +258,12 @@ void VvcTab::restore() {
     preset_combo_->setCurrentText(s.value("vvc/preset", "faster").toString());
     frames_spin_->setValue(s.value("vvc/frames", 33).toInt());
     crop_check_->setChecked(s.value("vvc/crop", true).toBool());
+    set_offset(s.value("vvc/encode_offset", 0).toInt());
+    output_edit_->setText(s.value("vvc/output_folder").toString());
+    for (std::size_t i = 0; i < std::size(fga_modes); ++i) {
+        write_checks_[i]->setChecked(s.value(QString("vvc/write_fga%1").arg(fga_modes[i].value), true).toBool());
+    }
+    update_write_controls();
 }
 
 void VvcTab::save() {
@@ -271,6 +278,15 @@ void VvcTab::save() {
     s.setValue("vvc/preset", preset_combo_->currentText());
     s.setValue("vvc/frames", frames_spin_->value());
     s.setValue("vvc/crop", crop_check_->isChecked());
+    s.setValue("vvc/encode", encode_edit_->text());
+    s.setValue("vvc/encode_offset", offset_);
+    if (!offset_pair_.isEmpty()) {
+        s.setValue("vvc/encode_offset_pair", offset_pair_);
+    }
+    s.setValue("vvc/output_folder", output_edit_->text().trimmed());
+    for (std::size_t i = 0; i < std::size(fga_modes); ++i) {
+        s.setValue(QString("vvc/write_fga%1").arg(fga_modes[i].value), write_checks_[i]->isChecked());
+    }
 }
 
 VvcSettings VvcTab::current_settings() const {
@@ -287,6 +303,11 @@ void VvcTab::startup() {
     if (!saved.isEmpty()) {
         source_edit_->setText(saved);
         load_source();
+    }
+    const QString saved_encode = settings_->value("vvc/encode").toString();
+    if (!saved_encode.isEmpty()) {
+        encode_edit_->setText(saved_encode);
+        load_encode();
     }
 }
 
@@ -315,6 +336,7 @@ void VvcTab::load_source() {
     release_later(std::exchange(source_frames_, {}));
     converter_.reset();
     source_.reset();
+    update_write_controls();
     crop_.reset();
     crop_known_ = false;
     crop_label_->clear();
@@ -363,6 +385,7 @@ void VvcTab::source_probed(const VideoInfo& info) {
     source_info_->setText(qstring(info.describe()));
     pane_->set_frame_count(info.frame_count());
     save();
+    update_write_controls();
     go_to(info.frame_count() / 3, true);
 }
 
@@ -986,7 +1009,7 @@ void VvcTab::shutdown() {
     save();
     frame_timer_.stop();  // each would start work
     settings_timer_.stop();
-    for (const QPointer<Job>& job : {job_, frame_job_, probe_job_}) {
+    for (const QPointer<Job>& job : {job_, frame_job_, probe_job_, encode_probe_job_, write_job_}) {
         stop_for_good(job, 10000);
     }
     if (viewer_window_ != nullptr) {

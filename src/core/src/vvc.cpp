@@ -157,16 +157,20 @@ std::optional<std::vector<SeiMessage>> parse_sei_messages(std::span<const std::u
 
 namespace {
 
-// A prefix SEI NAL unit without its AFGS1 messages: nothing if none is left,
-// the NAL unit as it was if it had none or does not parse.
-std::optional<Bytes> without_afgs1(std::span<const std::uint8_t> nal) {
+using MessageTest = bool (*)(const SeiMessage&);
+
+bool is_fgc(const SeiMessage& message) { return message.payload_type == sei_film_grain_characteristics; }
+
+// A prefix SEI NAL unit without the messages `replaced` picks: nothing if
+// none is left, the NAL unit as it was if it had none or does not parse.
+std::optional<Bytes> without(std::span<const std::uint8_t> nal, MessageTest replaced) {
     const std::optional<std::vector<SeiMessage>> messages = parse_sei_messages(nal);
-    if (!messages || std::none_of(messages->begin(), messages->end(), is_afgs1)) {
+    if (!messages || std::none_of(messages->begin(), messages->end(), replaced)) {
         return Bytes(nal.begin(), nal.end());
     }
     std::vector<SeiMessage> kept;
     std::copy_if(messages->begin(), messages->end(), std::back_inserter(kept),
-                 [](const SeiMessage& m) { return !is_afgs1(m); });
+                 [replaced](const SeiMessage& m) { return !replaced(m); });
     if (kept.empty()) {
         return std::nullopt;
     }
@@ -176,25 +180,26 @@ std::optional<Bytes> without_afgs1(std::span<const std::uint8_t> nal) {
     return out;
 }
 
-}  // namespace
-
-Inserted insert_t35(std::span<const std::uint8_t> packet, int length_size, std::span<const std::uint8_t> t35_payload) {
+// The packet without the prefix SEI messages `replaced` picks, and with one
+// message of `payload_type` holding `payload` if there is one.
+Inserted replace_sei(std::span<const std::uint8_t> packet, int length_size, MessageTest replaced, int payload_type,
+                     std::optional<std::span<const std::uint8_t>> payload) {
     const auto nals = split_nals(packet, length_size);
     const auto first_vcl = std::find_if(nals.begin(), nals.end(), [](auto nal) { return is_vcl(nal); });
     if (first_vcl == nals.end()) {
         return {Bytes(packet.begin(), packet.end()), false};
     }
-    const Bytes sei = sei_nal(sei_user_data_registered_t35, t35_payload, (*first_vcl)[0] & 0x3F, (*first_vcl)[1] & 0x07);
+    const Bytes sei = payload ? sei_nal(payload_type, *payload, (*first_vcl)[0] & 0x3F, (*first_vcl)[1] & 0x07) : Bytes();
     Inserted result{{}, true};
     result.packet.reserve(packet.size() + sei.size() + static_cast<std::size_t>(length_size));
-    bool sei_written = false;
+    bool sei_written = !payload;
     for (const auto nal : nals) {
         if (!sei_written && (is_vcl(nal) || nal_type(nal) == nal_picture_header)) {
             append_nal(result.packet, sei, length_size);
             sei_written = true;
         }
         if (nal_type(nal) == nal_prefix_sei) {
-            if (const std::optional<Bytes> kept = without_afgs1(nal)) {
+            if (const std::optional<Bytes> kept = without(nal, replaced)) {
                 append_nal(result.packet, *kept, length_size);
             }
             continue;
@@ -202,6 +207,29 @@ Inserted insert_t35(std::span<const std::uint8_t> packet, int length_size, std::
         append_nal(result.packet, nal, length_size);
     }
     return result;
+}
+
+}  // namespace
+
+PacketKind packet_kind(std::span<const std::uint8_t> packet, int length_size) {
+    PacketKind kind;
+    for (const auto nal : split_nals(packet, length_size)) {
+        if (is_vcl(nal) && !kind.picture_type) {
+            kind.picture_type = nal_type(nal);
+        }
+        kind.ends_sequence = kind.ends_sequence || nal_type(nal) == nal_end_of_sequence ||
+                             nal_type(nal) == nal_end_of_bitstream;
+    }
+    return kind;
+}
+
+Inserted insert_t35(std::span<const std::uint8_t> packet, int length_size, std::span<const std::uint8_t> t35_payload) {
+    return replace_sei(packet, length_size, is_afgs1, sei_user_data_registered_t35, t35_payload);
+}
+
+Inserted insert_fgc(std::span<const std::uint8_t> packet, int length_size,
+                    std::optional<std::span<const std::uint8_t>> payload) {
+    return replace_sei(packet, length_size, is_fgc, sei_film_grain_characteristics, payload);
 }
 
 std::set<int> prefix_sei_types(std::span<const std::uint8_t> packet, int length_size) {

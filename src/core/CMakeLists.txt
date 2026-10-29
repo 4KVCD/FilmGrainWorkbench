@@ -1,6 +1,7 @@
 # fgw_core: the engine, without Qt. Grain parameters and their AFGS1 coding,
 # grain synthesis, the display conversion, VVC packets, probing and decoding
-# with ffmpeg, the every-frame analysis, VVenC and vvdec scenes, writing MKVs.
+# with ffmpeg, the every-frame analysis, VVenC and vvdec scenes, VVenC's film grain
+# analysis added to an encode, writing MKVs.
 add_library(fgw_core STATIC
     src/afgs1.cpp
     src/alignment.cpp
@@ -24,6 +25,7 @@ add_library(fgw_core STATIC
     src/tools.cpp
     src/tuning.cpp
     src/vvc.cpp
+    src/vvc_fga.cpp
     src/vvc_grain.cpp)
 target_include_directories(fgw_core PUBLIC include)
 target_link_libraries(fgw_core PUBLIC fgw_platform nlohmann_json PRIVATE fgw_compile_options bcrypt)

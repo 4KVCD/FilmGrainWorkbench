@@ -34,16 +34,6 @@ QString duration_text(double seconds) {
                  : QString("about %1 min").arg(std::max<std::int64_t>(1, minutes % 60));
 }
 
-// Keeps Windows awake on the thread that creates it, until it goes. Windows
-// tracks this per thread, so the job that runs the Write holds it itself.
-class KeepAwake {
-public:
-    KeepAwake() { keep_awake(true); }
-    ~KeepAwake() { keep_awake(false); }
-    KeepAwake(const KeepAwake&) = delete;
-    KeepAwake& operator=(const KeepAwake&) = delete;
-};
-
 }  // namespace
 
 std::filesystem::path Av1Tab::every_frame_folder() const {

@@ -88,6 +88,10 @@ struct GrainSet {
 // coded video sequence. Throws std::invalid_argument for a stream it cannot read.
 std::vector<std::optional<GrainSet>> read_grain(std::span<const std::uint8_t> bitstream);
 
+// The NAL units of an Annex B byte stream, without their start codes (and
+// without the zero byte of a four-byte one).
+std::vector<std::span<const std::uint8_t>> annexb_nals(std::span<const std::uint8_t> data);
+
 // The source frames of a scene, cut once and encoded by every analysis mode.
 struct SceneCut {
     std::int64_t start = 0;  // first source frame (a cut file may start later)
@@ -147,6 +151,12 @@ private:
 // the largest picture area found is kept, so a dark scene cannot crop real
 // picture away. Nothing when there are no borders.
 std::optional<Crop> detect_black_bars(const std::string& ffmpeg, const VideoInfo& info, CancelToken* cancel = nullptr);
+
+// The frame rate to give vvencapp, which needs a whole number of its
+// 27 MHz ticks per frame: `fps` itself if it has one (16, 18, 24000/1001,
+// ...), else the standard rate within 0.05 % (24000/1001 for 2997/125, as
+// some muxers report 23.976 fps); nothing if neither.
+std::optional<Rational> vvenc_frame_rate(const Rational& fps);
 
 // vvencapp --hdr for the source: an HDR encode adapts its QPs to PQ or HLG.
 std::string vvenc_hdr_mode(const VideoInfo& info);

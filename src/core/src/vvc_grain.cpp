@@ -79,38 +79,13 @@ std::string GrainSet::describe() const {
 
 namespace {
 
-constexpr int sei_film_grain = 19;
-constexpr int nal_sps = 15;
-constexpr int nal_idr_w_radl = 7;
-constexpr int nal_idr_n_lp = 8;
-constexpr int nal_cra = 9;
-constexpr int nal_radl = 2;
-constexpr int nal_rasl = 3;
-
+using vvc::nal_cra;
+using vvc::nal_idr_n_lp;
+using vvc::nal_idr_w_radl;
+using vvc::nal_radl;
+using vvc::nal_rasl;
+using vvc::nal_sps;
 using Bytes = std::vector<std::uint8_t>;
-
-// The NAL units of an Annex B byte stream, without their start codes (and
-// without the zero byte of a four-byte one).
-std::vector<std::span<const std::uint8_t>> annexb_nals(std::span<const std::uint8_t> data) {
-    std::vector<std::size_t> starts;
-    for (std::size_t i = 0; i + 2 < data.size();) {
-        if (data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 1) {
-            starts.push_back(i + 3);
-            i += 3;
-        } else {
-            ++i;
-        }
-    }
-    std::vector<std::span<const std::uint8_t>> nals;
-    for (std::size_t k = 0; k < starts.size(); ++k) {
-        std::size_t end = k + 1 < starts.size() ? starts[k + 1] - 3 : data.size();
-        while (end > starts[k] && data[end - 1] == 0) {
-            --end;
-        }
-        nals.push_back(data.subspan(starts[k], end - starts[k]));
-    }
-    return nals;
-}
 
 // sps_log2_max_pic_order_cnt_lsb_minus4 + 4, read as vvdec reads the SPS (H.266 7.3.2.4).
 int poc_lsb_bits(std::span<const std::uint8_t> sps) {
@@ -229,6 +204,27 @@ struct Picture {
 
 }  // namespace
 
+std::vector<std::span<const std::uint8_t>> annexb_nals(std::span<const std::uint8_t> data) {
+    std::vector<std::size_t> starts;
+    for (std::size_t i = 0; i + 2 < data.size();) {
+        if (data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 1) {
+            starts.push_back(i + 3);
+            i += 3;
+        } else {
+            ++i;
+        }
+    }
+    std::vector<std::span<const std::uint8_t>> nals;
+    for (std::size_t k = 0; k < starts.size(); ++k) {
+        std::size_t end = k + 1 < starts.size() ? starts[k + 1] - 3 : data.size();
+        while (end > starts[k] && data[end - 1] == 0) {
+            --end;
+        }
+        nals.push_back(data.subspan(starts[k], end - starts[k]));
+    }
+    return nals;
+}
+
 std::vector<std::optional<GrainSet>> read_grain(std::span<const std::uint8_t> bitstream) {
     try {
         std::optional<int> lsb_bits;
@@ -248,7 +244,7 @@ std::vector<std::optional<GrainSet>> read_grain(std::span<const std::uint8_t> bi
                 lsb_bits = poc_lsb_bits(nal);
             } else if (kind == vvc::nal_prefix_sei) {
                 for (const vvc::SeiMessage& message : vvc::parse_sei_messages(nal).value_or(std::vector<vvc::SeiMessage>{})) {
-                    if (message.payload_type == sei_film_grain) {
+                    if (message.payload_type == vvc::sei_film_grain_characteristics) {
                         pending.push_back(parse_fgc(message.payload));
                     }
                 }
@@ -427,6 +423,22 @@ std::optional<Crop> detect_black_bars(const std::string& ffmpeg, const VideoInfo
     return best;
 }
 
+std::optional<Rational> vvenc_frame_rate(const Rational& fps) {
+    constexpr std::int64_t ticks_per_second = 27000000;  // vvencapp's default TicksPerSecond
+    if (fps.positive() && (ticks_per_second * fps.den) % fps.num == 0) {
+        return fps;
+    }
+    static const Rational standard[] = {{12, 1},    {25, 2},    {15, 1},    {24000, 1001}, {24, 1},
+                                        {25, 1},    {30000, 1001}, {30, 1}, {48, 1},       {50, 1},
+                                        {60000, 1001}, {60, 1}, {100, 1},   {120000, 1001}, {120, 1}};
+    for (const Rational& rate : standard) {
+        if (std::abs(fps.value() / rate.value() - 1) <= 0.0005) {
+            return rate;
+        }
+    }
+    return std::nullopt;
+}
+
 std::string vvenc_hdr_mode(const VideoInfo& info) {
     const bool wide = info.primaries.starts_with("bt2020");
     if (info.transfer == "smpte2084") {
@@ -494,12 +506,16 @@ Clip encode_scene(const VvcTools& tools, const SceneCut& cut, const VvcSettings&
     std::filesystem::create_directory(folder);
     try {
         const Geometry& g = cut.geometry;
+        const std::optional<Rational> fps = vvenc_frame_rate(cut.fps);
+        if (!fps) {
+            throw std::invalid_argument(format("VVenC does not take the source's frame rate (%.3f fps)", cut.fps.value()));
+        }
         progress(-1, format("Encoding %lld frames with VVenC --fga %d (QP %g, %s)…", static_cast<long long>(cut.count),
                             settings.fga, settings.coding.qp, settings.coding.preset.c_str()));
         const auto started = std::chrono::steady_clock::now();
         std::vector<std::string> encode = {tools.vvencapp, "-i", utf8(cut.source_file()), "-s",
                                            std::to_string(g.width) + "x" + std::to_string(g.height), "-c", "yuv420_10",
-                                           "--fps", cut.fps.to_string(), "-f", std::to_string(cut.count), "--qp",
+                                           "--fps", fps->to_string(), "-f", std::to_string(cut.count), "--qp",
                                            format("%g", settings.coding.qp), "--preset", settings.coding.preset,
                                            "--fga", std::to_string(settings.fga), "--fgastrength",
                                            std::to_string(settings.coding.strength)};

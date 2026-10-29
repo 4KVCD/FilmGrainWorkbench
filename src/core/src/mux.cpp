@@ -227,15 +227,6 @@ void check_writable(const VideoInfo& encoded) {
 
 WriteReport write_afgs1_mkv(const Tools& tools, const VideoInfo& encoded, const std::filesystem::path& output,
                             const GrainPlan& plan, int base_seed, const Progress& progress, CancelToken* cancel) {
-    std::string extension = utf8(output.extension());
-    std::transform(extension.begin(), extension.end(), extension.begin(), [](unsigned char c) { return std::tolower(c); });
-    if (extension != ".mkv") {
-        throw std::invalid_argument("the output must be a .mkv file");
-    }
-    std::error_code error;
-    if (std::filesystem::exists(output, error) && std::filesystem::equivalent(output, encoded.path, error)) {
-        throw std::invalid_argument("the output must not overwrite the encoded input");
-    }
     const PictureFormat picture = picture_format(encoded);
     // By GrainPlan::key_at. Up to 4,096: a whole-film plan has ~150,000 keys,
     // and pictures come in decode order, so a key is met again only within a
@@ -257,6 +248,23 @@ WriteReport write_afgs1_mkv(const Tools& tools, const VideoInfo& encoded, const 
         }
         return *slot;
     };
+    const PacketEdit edit = [&](std::span<const std::uint8_t> packet, int length_size, std::int64_t index) {
+        return vvc::insert_t35(packet, length_size, template_for(index).for_seed(picture_seed(base_seed, index)));
+    };
+    return write_vvc_mkv(tools, encoded, output, edit, progress, cancel);
+}
+
+WriteReport write_vvc_mkv(const Tools& tools, const VideoInfo& encoded, const std::filesystem::path& output,
+                          const PacketEdit& edit, const Progress& progress, CancelToken* cancel) {
+    std::string extension = utf8(output.extension());
+    std::transform(extension.begin(), extension.end(), extension.begin(), [](unsigned char c) { return std::tolower(c); });
+    if (extension != ".mkv") {
+        throw std::invalid_argument("the output must be a .mkv file");
+    }
+    std::error_code error;
+    if (std::filesystem::exists(output, error) && std::filesystem::equivalent(output, encoded.path, error)) {
+        throw std::invalid_argument("the output must not overwrite the encoded input");
+    }
     const double fps = encoded.fps.value();
     if (!output.parent_path().empty()) {
         std::filesystem::create_directories(output.parent_path());
@@ -286,8 +294,7 @@ WriteReport write_afgs1_mkv(const Tools& tools, const VideoInfo& encoded, const 
                 const std::set<int> types = vvc::prefix_sei_types(packet->data, length_size);
                 sei_types.insert(types.begin(), types.end());
             }
-            const std::vector<std::uint8_t> payload = template_for(index).for_seed(picture_seed(base_seed, index));
-            const vvc::Inserted inserted = vvc::insert_t35(packet->data, length_size, payload);
+            const vvc::Inserted inserted = edit(packet->data, length_size, index);
             pictures += inserted.is_picture ? 1 : 0;
             const std::int64_t duration_ms =
                 packet->duration ? static_cast<std::int64_t>(std::nearbyint(seconds_of(packet->duration, time_base) * 1000))
