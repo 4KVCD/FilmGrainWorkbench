@@ -213,7 +213,10 @@ ToolOutput run_tool(const std::vector<std::string>& command, CancelToken* cancel
         throw Cancelled();
     }
     if (exit_code != 0) {
-        throw tool_failure(command.front(), exit_code, output.error_log);  // with the exit code: mkvmerge's 1 is a warning
+        // With the exit code: mkvmerge's 1 is a warning. mkvmerge writes its
+        // errors to standard output, so that is the log when standard error is empty.
+        const bool quiet_errors = output.error_log.find_first_not_of(" \r\n") == std::string::npos;
+        throw tool_failure(command.front(), exit_code, quiet_errors ? output.standard_output : output.error_log);
     }
     return output;
 }

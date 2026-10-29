@@ -16,9 +16,9 @@ std::string utf8(const std::filesystem::path& path);
 // 150000 -> "150,000" (Python's "{:,}").
 std::string with_thousands(std::int64_t value);
 
-// A double as Python's repr() writes it: the shortest text that reads back
-// the same, with ".0" on whole numbers ("1000.0", "0.1", "1e+16").
-std::string python_float(double value);
+// A double in plain decimal notation, the shortest that reads back the same:
+// "1000", "0.0001", "0.00009999999747378752" (never "1e-04").
+std::string decimal_text(double value);
 
 // SHA-1 of `text` as lowercase hex (the names of the app's saved analyses).
 std::string sha1_hex(std::string_view text);

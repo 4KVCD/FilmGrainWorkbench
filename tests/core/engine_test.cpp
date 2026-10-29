@@ -30,6 +30,26 @@ TEST(RunTool, AFailureCarriesTheExitCode) {
     }
 }
 
+// mkvmerge writes its errors to standard output: a failure said nothing more
+// than its exit code.
+TEST(RunTool, AFailureWithoutAnErrorLogShowsItsOutput) {
+    try {
+        run_tool({"cmd.exe", "/c", "echo Error: bad argument& exit 2"});
+        FAIL() << "no error";
+    } catch (const ToolError& error) {
+        EXPECT_NE(std::string(error.what()).find("Error: bad argument"), std::string::npos) << error.what();
+    }
+}
+
+// mkvmerge rejected an HDR encode's minimum luminance written as 1e-04 (or,
+// read back from an MKV as a float, 9.999999747378752e-05).
+TEST(Text, DecimalsWithoutExponents) {
+    EXPECT_EQ(decimal_text(0.0001), "0.0001");
+    EXPECT_EQ(decimal_text(static_cast<double>(0.0001f)), "0.00009999999747378752");
+    EXPECT_EQ(decimal_text(1000.0), "1000");
+    EXPECT_EQ(decimal_text(0.3127), "0.3127");
+}
+
 TEST(Rational, LimitsDenominatorsAsPython) {
     const json reference = load_reference("engine.json");
     ASSERT_FALSE(reference.at("fractions").empty());

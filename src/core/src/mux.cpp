@@ -98,7 +98,8 @@ const std::vector<std::string> mastering_keys = {"chromaticity_coordinates", "wh
                                                  "max_luminance", "min_luminance"};
 const std::vector<std::string> light_level_keys = {"max_content_light", "max_frame_light"};
 
-// A property value as the Python app passed it to mkvmerge (str(value)).
+// A property value as mkvmerge takes it: numbers in plain decimals (it
+// rejects exponents, as in 1e-04, a mastering display's usual minimum luminance).
 std::string option_value(const json& value) {
     if (value.is_boolean()) {
         return value.get<bool>() ? "1" : "0";
@@ -107,7 +108,7 @@ std::string option_value(const json& value) {
         return value.get<std::string>();
     }
     if (value.is_number_float()) {
-        return python_float(value.get<double>());
+        return decimal_text(value.get<double>());
     }
     return value.dump();
 }

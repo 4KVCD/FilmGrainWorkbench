@@ -28,14 +28,10 @@ std::string with_thousands(std::int64_t value) {
     return value < 0 ? "-" + digits : digits;
 }
 
-std::string python_float(double value) {
-    char buffer[64];
-    const auto [end, error] = std::to_chars(buffer, buffer + sizeof buffer, value);
-    std::string text(buffer, error == std::errc() ? end : buffer);
-    if (text.find_first_of(".eEn") == std::string::npos) {  // n: inf, nan
-        text += ".0";
-    }
-    return text;
+std::string decimal_text(double value) {
+    char buffer[400];  // the longest: the 309 digits of the largest double
+    const auto [end, error] = std::to_chars(buffer, buffer + sizeof buffer, value, std::chars_format::fixed);
+    return std::string(buffer, error == std::errc() ? end : buffer);
 }
 
 std::string sha1_hex(std::string_view text) {
