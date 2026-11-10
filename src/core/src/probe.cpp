@@ -71,18 +71,25 @@ double tag_seconds(const std::string& value) {
     return std::stoi(match[1]) * 3600 + std::stoi(match[2]) * 60 + std::stod(match[3]);
 }
 
-// The exact picture count from the stream header or mkvmerge's statistics tags.
-std::int64_t frame_count_of(const json& stream, const std::vector<std::pair<std::string, std::string>>& tags) {
+// The exact picture count from the stream header or mkvmerge's statistics
+// tags, if `duration_frames` (the duration times the frame rate) agrees with
+// it: FFmpeg copies a remux's statistics tags into an encode of an excerpt,
+// where they count the whole film. The duration can run a little past the
+// pictures (the audio's: 2,145 frames for 2,128), so 2 % or 2 frames pass.
+std::int64_t frame_count_of(const json& stream, const std::vector<std::pair<std::string, std::string>>& tags,
+                            double duration_frames) {
     std::vector<std::string> values = {text_of(stream, "nb_frames")};
     for (const auto& [key, value] : tags) {
         if (key.starts_with("NUMBER_OF_FRAMES")) {
             values.push_back(value);
         }
     }
+    const double tolerance = std::max(2.0, 0.02 * duration_frames);
     for (const std::string& value : values) {
         std::int64_t count = 0;
         const auto [end, error] = std::from_chars(value.data(), value.data() + value.size(), count);
-        if (error == std::errc() && end == value.data() + value.size() && count > 0) {
+        if (error == std::errc() && end == value.data() + value.size() && count > 0 &&
+            std::abs(static_cast<double>(count) - duration_frames) <= tolerance) {
             return count;
         }
     }
@@ -196,7 +203,7 @@ VideoInfo parse_probe(const std::filesystem::path& path, const json& data, doubl
     info.transfer = text_of(s, "color_transfer");
     info.primaries = text_of(s, "color_primaries");
     info.start_time = to_double(text_of(format_section, "start_time")).value_or(0.0);
-    info.frames = frame_count_of(s, tags);
+    info.frames = frame_count_of(s, tags, duration * fps.value());
     return info;
 }
 

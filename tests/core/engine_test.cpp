@@ -60,6 +60,28 @@ TEST(VvencStrength, PercentToVvencsSteps) {
     EXPECT_EQ(vvenc_strength(400), "3.984375");
 }
 
+// FFmpeg copies a remux's mkvmerge statistics tags into an encode of an
+// excerpt: a 96-frame encode of The Beekeeper said NUMBER_OF_FRAMES 151919,
+// and the VVC tab analysed the rest of the film. A count the stream's own
+// duration contradicts is not used; a matching one still is.
+TEST(Probe, APictureCountTheDurationContradictsIsNotUsed) {
+    const auto encode = [](const char* frames, const char* duration) {
+        const json data = {
+            {"streams", {{{"index", 0}, {"codec_type", "video"}, {"codec_name", "vvc"}, {"width", 3840},
+                          {"height", 2160}, {"pix_fmt", "yuv420p10le"}, {"avg_frame_rate", "24000/1001"},
+                          {"r_frame_rate", "24000/1001"},
+                          {"tags", {{"NUMBER_OF_FRAMES", frames}, {"DURATION", duration}}}}}},
+            {"format", {{"format_name", "matroska,webm"}, {"start_time", "0.000000"}}}};
+        return parse_probe("encode.mkv", data, 0.0);
+    };
+    const VideoInfo copied = encode("151919", "00:00:04.046000000");  // FFmpeg's duration, the source's count
+    EXPECT_EQ(copied.frames, 0);
+    EXPECT_EQ(copied.frame_count(), 97);
+    const VideoInfo remuxed = encode("96", "00:00:04.004000000");  // mkvmerge's own statistics
+    EXPECT_EQ(remuxed.frames, 96);
+    EXPECT_EQ(remuxed.frame_count(), 96);
+}
+
 TEST(Rational, LimitsDenominatorsAsPython) {
     const json reference = load_reference("engine.json");
     ASSERT_FALSE(reference.at("fractions").empty());
