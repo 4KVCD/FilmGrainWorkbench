@@ -29,20 +29,27 @@ namespace fgw {
 // Each mode's FGC SEI payloads by the first frame each applies to, in
 // frames of the analysed range (0 is its first); a set applies up to the
 // next one's first frame, the first set also to the frames before it.
+// Modes 2 and 3 also have a set of each frame's own, fitted to the grain the
+// encode lost (vvencapp --fgastacked), which comes first.
 class FgaSegments {
 public:
     // A set applies from `first_frame` on, replacing those from there on (as VVenC keeps them).
     void add(int mode, std::int64_t first_frame, std::vector<std::uint8_t> payload);
+    // The set of `frame` alone, fitted to the grain the encode lost.
+    void add_fitted(int mode, std::int64_t frame, std::vector<std::uint8_t> payload);
     bool has(int mode) const;
-    // The payload in force at `frame`. Throws std::out_of_range for a mode without sets.
+    bool has_fitted(int mode, std::int64_t frame) const;
+    // The payload in force at `frame`: its fitted set, else the segment's.
+    // Throws std::out_of_range for a mode without sets.
     const std::vector<std::uint8_t>& payload_at(int mode, std::int64_t frame) const;
 
 private:
     std::map<std::int64_t, std::vector<std::uint8_t>> by_mode_[3];
+    std::map<std::int64_t, std::vector<std::uint8_t>> fitted_[3];
 };
 
 // The sets vvencapp --fga 4 wrote. Throws std::invalid_argument for a
-// stream without a set of every mode.
+// stream without a set of every mode, or without fitted sets of modes 2 and 3.
 FgaSegments read_fga_segments(std::span<const std::uint8_t> stream);
 
 // What analyse_film_grain found.
@@ -57,7 +64,11 @@ struct FgaAnalysis {
 // picture as the AV1 analysis reads it, analysed by vvencapp --fga 4 with
 // `coding`'s QP, preset and strength (the QP sets how much the analysis's
 // filter smooths, as in an encode at that QP) at the encode's bit depth and
-// frame rate (vvenc_frame_rate), as VVenC analyses what it encodes.
+// frame rate (vvenc_frame_rate), as VVenC analyses what it encodes. The
+// encode's decoded frames go with the source's (--fgastacked), so modes 2
+// and 3 are also fitted, frame by frame, to the grain the encode lost, as
+// VVenC fits its own encodes (pooled over its own GOP structure, VVenC's
+// default).
 // Throws std::invalid_argument for an encode VVenC cannot match (not 8- or
 // 10-bit 4:2:0, a frame rate it does not take), ToolError, Cancelled.
 FgaAnalysis analyse_film_grain(const Tools& tools, const VvcTools& vvc_tools, const VideoInfo& source,

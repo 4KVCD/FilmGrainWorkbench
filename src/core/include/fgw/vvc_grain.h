@@ -158,6 +158,11 @@ std::optional<Crop> detect_black_bars(const std::string& ffmpeg, const VideoInfo
 // some muxers report 23.976 fps); nothing if neither.
 std::optional<Rational> vvenc_frame_rate(const Rational& fps);
 
+// vvencapp --fgastrength for `percent` percent of the analysed grain. VVenC
+// takes a factor and keeps it in steps of 1/64 up to 255/64 (3.98), so the
+// nearest step is given, written exactly: 100 -> "1", 33 -> "0.328125".
+std::string vvenc_strength(int percent);
+
 // vvencapp --hdr for the source: an HDR encode adapts its QPs to PQ or HLG.
 std::string vvenc_hdr_mode(const VideoInfo& info);
 

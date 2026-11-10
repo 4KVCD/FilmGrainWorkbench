@@ -439,6 +439,12 @@ std::optional<Rational> vvenc_frame_rate(const Rational& fps) {
     return std::nullopt;
 }
 
+std::string vvenc_strength(int percent) {
+    constexpr long steps_per_unit = 64;  // VVenC's fixed point: 6 fractional bits in one byte
+    const long steps = std::clamp(std::lround(percent * steps_per_unit / 100.0), 0L, 255L);
+    return decimal_text(static_cast<double>(steps) / steps_per_unit);  // exact in binary, so exact in decimal
+}
+
 std::string vvenc_hdr_mode(const VideoInfo& info) {
     const bool wide = info.primaries.starts_with("bt2020");
     if (info.transfer == "smpte2084") {
@@ -518,7 +524,7 @@ Clip encode_scene(const VvcTools& tools, const SceneCut& cut, const VvcSettings&
                                            "--fps", fps->to_string(), "-f", std::to_string(cut.count), "--qp",
                                            format("%g", settings.coding.qp), "--preset", settings.coding.preset,
                                            "--fga", std::to_string(settings.fga), "--fgastrength",
-                                           std::to_string(settings.coding.strength)};
+                                           vvenc_strength(settings.coding.strength)};
         if (cut.hdr != "off") {
             encode.insert(encode.end(), {"--hdr", cut.hdr});
         }

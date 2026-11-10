@@ -24,16 +24,21 @@ using Bytes = std::vector<std::uint8_t>;
 // The marker before each parameter set of --fga 4: a user data unregistered
 // SEI message with this UUID (393cc818-0a4b-4cef-8e2d-f1605b9577c0) and five
 // data bytes: the mode, then the first frame (POC) the set applies to, a
-// big-endian two's complement int (the lowest int for the first set).
+// big-endian two's complement int (the lowest int for the first set). With
+// --fgastacked, 128 + the mode marks a set of that frame alone, fitted to the
+// grain the encode lost.
 constexpr std::array<std::uint8_t, 16> segment_marker_uuid = {0x39, 0x3c, 0xc8, 0x18, 0x0a, 0x4b, 0x4c, 0xef,
                                                               0x8e, 0x2d, 0xf1, 0x60, 0x5b, 0x95, 0x77, 0xc0};
 
 // VVenC keeps the latest 160 frames it wrote, five GOPs of 32 (FGC_SEI_HISTORY).
 constexpr std::size_t written_history = 160;
 
+constexpr std::uint8_t fitted_flag = 0x80;
+
 struct Marker {
     int mode = 0;
     std::int64_t first_frame = 0;
+    bool fitted = false;  // the set of first_frame alone
 };
 
 std::optional<Marker> segment_marker(const vvc::SeiMessage& message) {
@@ -45,7 +50,7 @@ std::optional<Marker> segment_marker(const vvc::SeiMessage& message) {
     const std::size_t at = segment_marker_uuid.size();
     const auto poc = static_cast<std::int32_t>((std::uint32_t{data[at + 1]} << 24) | (std::uint32_t{data[at + 2]} << 16) |
                                                (std::uint32_t{data[at + 3]} << 8) | data[at + 4]);
-    return Marker{data[at], poc};
+    return Marker{data[at] & ~fitted_flag, poc, (data[at] & fitted_flag) != 0};
 }
 
 // ffmpeg's standard error without the key=value lines of -progress.
@@ -98,11 +103,25 @@ void FgaSegments::add(int mode, std::int64_t first_frame, std::vector<std::uint8
     sets[first_frame] = std::move(payload);
 }
 
+void FgaSegments::add_fitted(int mode, std::int64_t frame, std::vector<std::uint8_t> payload) {
+    if (mode < 1 || mode > 3) {
+        throw std::invalid_argument("film grain analysis mode " + std::to_string(mode) + " does not exist");
+    }
+    fitted_[mode - 1][frame] = std::move(payload);
+}
+
 bool FgaSegments::has(int mode) const { return mode >= 1 && mode <= 3 && !by_mode_[mode - 1].empty(); }
+
+bool FgaSegments::has_fitted(int mode, std::int64_t frame) const {
+    return mode >= 1 && mode <= 3 && fitted_[mode - 1].contains(frame);
+}
 
 const std::vector<std::uint8_t>& FgaSegments::payload_at(int mode, std::int64_t frame) const {
     if (!has(mode)) {
         throw std::out_of_range("no film grain parameters of --fga " + std::to_string(mode));
+    }
+    if (const auto fitted = fitted_[mode - 1].find(frame); fitted != fitted_[mode - 1].end()) {
+        return fitted->second;
     }
     const auto& sets = by_mode_[mode - 1];
     const auto after = sets.upper_bound(frame);
@@ -120,13 +139,17 @@ FgaSegments read_fga_segments(std::span<const std::uint8_t> stream) {
             if (const std::optional<Marker> marker = segment_marker(message)) {
                 pending = marker;
             } else if (message.payload_type == vvc::sei_film_grain_characteristics && pending) {
-                segments.add(pending->mode, pending->first_frame, std::move(message.payload));
+                if (pending->fitted) {
+                    segments.add_fitted(pending->mode, pending->first_frame, std::move(message.payload));
+                } else {
+                    segments.add(pending->mode, pending->first_frame, std::move(message.payload));
+                }
                 pending.reset();
             }
         }
     }
     for (const int mode : {1, 2, 3}) {
-        if (!segments.has(mode)) {
+        if (!segments.has(mode) || (mode > 1 && !segments.has_fitted(mode, 0))) {
             throw std::invalid_argument("VVenC's film grain analysis wrote no parameters of --fga " +
                                         std::to_string(mode) + " (not the app's VVenC build?)");
         }
@@ -144,10 +167,12 @@ FgaAnalysis analyse_film_grain(const Tools& tools, const VvcTools& vvc_tools, co
     if (vvc_tools.vvencapp.empty() || !std::filesystem::is_regular_file(utf8_path(vvc_tools.vvencapp), error)) {
         throw ToolError("Not found: vvencapp. " + missing_program_hint());
     }
-    // A vvencapp built before --fga 4 refuses it: ask it first, so that the message says what to do. Its
-    // --fullhelp names the UUID of the --fga 4 markers (on one line, unlike the wrapped words around it).
+    // A vvencapp built before --fga 4 or --fgastacked refuses them: ask it first, so that the message says
+    // what to do. Its --fullhelp names the UUID of the --fga 4 markers (on one line, unlike the wrapped words
+    // around it) and the option.
     const std::string help = run_tool({vvc_tools.vvencapp, "--fullhelp"}, cancel).standard_output;
-    if (help.find("393cc818-0a4b-4cef-8e2d-f1605b9577c0") == std::string::npos) {
+    if (help.find("393cc818-0a4b-4cef-8e2d-f1605b9577c0") == std::string::npos ||
+        help.find("fgastacked") == std::string::npos) {
         throw ToolError("This vvencapp cannot analyse without encoding (--fga 4): rebuild it with "
                         "vvc\\build_vvc_tools.ps1.");
     }
@@ -163,26 +188,39 @@ FgaAnalysis analyse_film_grain(const Tools& tools, const VvcTools& vvc_tools, co
     const std::int64_t count = last - first;
     const Rational fps = encoded.fps;
 
-    // Each source frame's timestamp becomes its frame number from `first`,
-    // and a constant frame rate output repeats a frame a decoder dropped, so
-    // frame N of the output is the source frame encoded frame first + N shows.
-    const std::string filters =
-        filter_chain(source, g, crop) + format(",settb=%lld/%lld,setpts='round((T-%.6f)*%lld/%lld)%+lld'", fps.den,
-                                               fps.num, source.first_pts, fps.num, fps.den, -(first + offset));
+    // Every frame: the source frame on top of the encode's frame that shows it (vstack), so that VVenC fits
+    // the grain to what the encode lost. Each frame's timestamp becomes its frame number from `first`, so vstack
+    // pairs frames by time, as the AV1 analysis does (a frame one decoder drops costs one repeated frame instead
+    // of shifting every later pair), and a constant frame rate output repeats a frame a decoder dropped: frame N
+    // of the output is encoded frame first + N and the source frame it shows. The encode's own film grain is
+    // exported, not added.
+    const auto number = [&fps](const VideoInfo& info, std::int64_t shift) {
+        return format("settb=%lld/%lld,setpts='round((T-%.6f)*%lld/%lld)%+lld'", fps.den, fps.num, info.first_pts,
+                      fps.num, fps.den, -shift);
+    };
+    const std::string graph = format("[0:%d]", source.stream_index) + filter_chain(source, g, crop) + "," +
+                              number(source, first + offset) + "[s];" + format("[1:%d]", encoded.stream_index) +
+                              filter_chain(encoded, g, std::nullopt) + "," + number(encoded, first) + "[e];" +
+                              "[s][e]vstack=inputs=2:shortest=1[o]";
     std::vector<std::string> ffmpeg = {tools.ffmpeg, "-v", "error", "-nostdin", "-progress", "pipe:2", "-copyts"};
     for (std::string& arg : seek_args(source, first + offset)) {
         ffmpeg.push_back(std::move(arg));
     }
-    ffmpeg.insert(ffmpeg.end(), {"-i", utf8(source.path), "-map", "0:" + std::to_string(source.stream_index), "-vf",
-                                 filters, "-frames:v", std::to_string(count), "-fps_mode", "cfr", "-f", "rawvideo",
-                                 "-pix_fmt", g.pix_fmt(), "pipe:1"});
+    ffmpeg.insert(ffmpeg.end(), {"-i", utf8(source.path), "-export_side_data", "film_grain"});
+    for (std::string& arg : seek_args(encoded, first)) {
+        ffmpeg.push_back(std::move(arg));
+    }
+    ffmpeg.insert(ffmpeg.end(), {"-i", utf8(encoded.path), "-filter_complex", graph, "-map", "[o]", "-frames:v",
+                                 std::to_string(count), "-fps_mode", "cfr", "-f", "rawvideo", "-pix_fmt", g.pix_fmt(),
+                                 "pipe:1"});
     const std::filesystem::path output = work_folder / "fga-segments.266";
     std::vector<std::string> vvencapp = {vvc_tools.vvencapp, "-i", "-", "-s",
                                          std::to_string(g.width) + "x" + std::to_string(g.height), "-c",
                                          g.bit_depth > 8 ? "yuv420_10" : "yuv420", "--internal-bitdepth",
                                          std::to_string(g.bit_depth), "--fps", vvenc_fps->to_string(), "-f",
                                          std::to_string(count), "--qp", format("%g", coding.qp), "--preset",
-                                         coding.preset, "--fgastrength", std::to_string(coding.strength), "--fga", "4"};
+                                         coding.preset, "--fgastrength", vvenc_strength(coding.strength), "--fga", "4",
+                                         "--fgastacked", "1"};
     if (const std::string hdr = vvenc_hdr_mode(source); hdr != "off") {
         vvencapp.insert(vvencapp.end(), {"--hdr", hdr});
     }
@@ -285,7 +323,9 @@ WriteReport write_fgc_mkv(const Tools& tools, const VideoInfo& encoded, const st
         const std::int64_t frame = index - analysis.first;
         const std::vector<std::uint8_t>& payload = analysis.segments.payload_at(fga, frame);
         const vvc::PacketKind kind = vvc::packet_kind(packet, length_size);
-        const bool changed = analysis.segments.payload_at(fga, frame - 1) != payload;
+        // A frame with a set of its own (fitted) carries it, as VVenC writes one on every picture whose set it fits.
+        const bool changed =
+            analysis.segments.has_fitted(fga, frame) || analysis.segments.payload_at(fga, frame - 1) != payload;
         const bool needed =
             kind.picture_type && placement.needed(frame, *kind.picture_type, changed, std::exchange(sequence_ended, false));
         sequence_ended = sequence_ended || kind.ends_sequence;

@@ -152,7 +152,8 @@ QGroupBox* VvcTab::vvenc_group() {
     strength_spin_->setValue(100);
     strength_spin_->setSingleStep(10);
     strength_spin_->setSuffix(" %");
-    strength_spin_->setToolTip("--fgastrength: grain strength in percent of what the analysis measured.");
+    strength_spin_->setToolTip("--fgastrength: grain strength in percent of what the analysis measured. VVenC rounds "
+                               "it to steps of 1/64 (1.5625 %) and keeps at most 398.4 %.");
     qp_spin_ = new QDoubleSpinBox;
     qp_spin_->setRange(0, 63);
     qp_spin_->setValue(28);
@@ -167,7 +168,7 @@ QGroupBox* VvcTab::vvenc_group() {
     frames_spin_->setRange(9, 129);
     frames_spin_->setValue(33);
     frames_spin_->setToolTip("Frames Encode this scene encodes, centred on the frame shown. VVenC analyses the grain "
-                             "once per GOP (32 frames), so 33 covers one GOP and the next.");
+                             "once per GOP (32 frames) and at every scene cut, so 33 covers one GOP and the next.");
     form->addRow("Film grain analysis", fga_combo_);
     form->addRow("Strength", strength_spin_);
     form->addRow("QP", qp_spin_);

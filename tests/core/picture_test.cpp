@@ -191,11 +191,26 @@ TEST(VvcFga, ReadsTheAnalysisAndKeepsItsSetsAsVvenc) {
     marker(2, 32);
     add_nal(vvc::sei_film_grain_characteristics, {0x22, 0x80});
     marker(1, 40);  // a marker without its set: nothing
+    // Without the sets fitted to the encode's loss (--fgastacked), modes 2 and 3 are incomplete.
+    EXPECT_THROW(read_fga_segments(stream), std::invalid_argument);
+    // 128 + the mode: the set of that frame alone, fitted to the grain the encode lost.
+    for (const int mode : {2, 3}) {
+        marker(0x80 | mode, 0);
+        add_nal(vvc::sei_film_grain_characteristics, {static_cast<std::uint8_t>(0xF0 | mode), 0x80});
+    }
+    marker(0x80 | 2, 33);
+    add_nal(vvc::sei_film_grain_characteristics, {0xF3, 0x3F});
     FgaSegments segments = read_fga_segments(stream);
     EXPECT_EQ(segments.payload_at(1, 100), (std::vector<std::uint8_t>{1, 0x80}));
     EXPECT_EQ(segments.payload_at(2, -5), (std::vector<std::uint8_t>{2, 0x80}));
+    EXPECT_EQ(segments.payload_at(2, 0), (std::vector<std::uint8_t>{0xF2, 0x80}));
+    EXPECT_EQ(segments.payload_at(3, 0), (std::vector<std::uint8_t>{0xF3, 0x80}));
     EXPECT_EQ(segments.payload_at(2, 31), (std::vector<std::uint8_t>{2, 0x80}));
     EXPECT_EQ(segments.payload_at(2, 32), (std::vector<std::uint8_t>{0x22, 0x80}));
+    EXPECT_EQ(segments.payload_at(2, 33), (std::vector<std::uint8_t>{0xF3, 0x3F}));
+    EXPECT_EQ(segments.payload_at(2, 34), (std::vector<std::uint8_t>{0x22, 0x80}));
+    EXPECT_TRUE(segments.has_fitted(2, 33));
+    EXPECT_FALSE(segments.has_fitted(1, 0));
     // A set from an earlier frame replaces the later ones, as VVenC keeps its sets.
     segments.add(2, 64, {0x64});
     segments.add(2, 48, {0x48});

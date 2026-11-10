@@ -16,8 +16,8 @@ AV1 film grain (AFGS1) metadata that players synthesise at playback.
   much grain VVenC removed and vvdec adds back, in numbers.
 - 4K HDR (PQ, HLG) sources, black bars found and cropped as an encode would.
 - Add VVenC's grain to your own VVC encode, without encoding: VVenC analyses
-  the source, and the app writes one MKV per analysis mode, the same pictures
-  with each mode's grain metadata.
+  the source and fits the grain to what your encode lost, and the app writes
+  one MKV per analysis mode, the same pictures with each mode's grain metadata.
 
 ![The VVC grain analyzer tab: source, VVenC settings and the four views](docs/screenshots/vvc-tab.png)
 
@@ -49,10 +49,24 @@ The encode loses most of the grain (VVenC's MCTF pre-filter and the
 quantisation remove it). All three modes measure the source's grain once per
 GOP and describe it in a film grain characteristics (FGC) SEI message, so the
 decoder can add similar grain back. They differ in how they measure the
-grain and which grain model describes it. Modes 1 to 3 as included here come
-from VVenC pull requests
+grain and which grain model describes it. Modes 1 to 3 as included here are
+VVenC master's (pull requests
 [764](https://github.com/fraunhoferhhi/vvenc/pull/764) and
-[765](https://github.com/fraunhoferhhi/vvenc/pull/765), not merged yet.
+[765](https://github.com/fraunhoferhhi/vvenc/pull/765)) with newer fixes (not
+merged yet): every shot gets its own grain, measured inside the shot; no grain
+on clipped highlights and other flat areas; and in `--fga 2` and `3`, no coarse
+grain on fast motion, no grain on black bars, grain that fades above the
+brightest flat areas, grain on bright areas that have no flat blocks, no
+excess grain in the shadows, more grain on Blu-ray sources whose grain repeats
+from frame to frame, `--fga 3` grain as fine as the source's (no longer too
+fine), and `--fga 3` streams that FFmpeg decodes. In the scene encodes,
+`--fga 2` and `3` are also fitted, picture by picture, to the grain VVenC's
+coding lost (its amount, size and direction); the grain added to your own
+encode is fitted the same way to the grain your encode lost (VVenC reads its
+decoded pictures beside the source's). That fit pools pictures over VVenC's
+own GOP structure, exact for a VVenC encode made with it and close for others;
+for a picture height that is not a multiple of 8, it measures the picture
+without the rows VVenC would pad.
 
 **`--fga 1`: VTM's analysis, ported and fixed.** A port of the reference
 encoder's analysis (VTM, JVET-AN0237) with seven of its bugs fixed (among
@@ -85,7 +99,8 @@ decoders with the AR model show it: vvdec does; VTM's synthesis rejects it.
 | `--fga 2` | the temporal residual | calibrated | frequency | any H.274 |
 | `--fga 3` | the temporal residual | calibrated | auto-regressive | vvdec (not VTM) |
 
-Measured on The Beekeeper at QP 28 (from the pull requests; grain level 1.00 =
+Measured on The Beekeeper at QP 28 (from the pull requests, before the newer
+fixes; grain level 1.00 =
 the source's, spectrum error lower = closer texture):
 
 | | `--fga 1` | `--fga 2` | `--fga 3` |
@@ -139,7 +154,7 @@ Each mode writes an H.274 film grain characteristics SEI message; vvdec decodes
 every encode twice, without and with its grain synthesis. The selected mode is
 shown as soon as it is ready; the other two are encoded in the background, so
 switching modes is then instant. VVenC analyses the grain once per GOP (32
-frames), switching to new parameters exactly at a scene cut, and writes the
+frames) and at every scene cut, where the new parameters start, and writes the
 message only where the parameters change and at random access points; it
 persists, so the pictures in between keep the latest parameters. Inside the
 encoded scene the views are:
@@ -252,9 +267,11 @@ first time.
   fetches libaom and builds it with gcc, like libaom's own Release build, so its
   floating-point results match libaom's.
 - vvencapp and vvdecapp (`vvc/build_vvc_tools.ps1`) need Visual Studio 2022,
-  CMake and git. VVenC is fraunhoferhhi/vvenc pull request 765, which includes
-  pull request 764, plus `vvc/vvenc-fga-analysis-only.patch` (`--fga 4`: the
-  three modes' analyses without coding); vvdec is its master branch with pull
+  CMake and git. VVenC is commit 1eb07fe0 (master of the 4KVCD fork:
+  fraunhoferhhi/vvenc master with the 4KVCD pull requests not merged yet,
+  among them the film grain analysis fixes), plus
+  `vvc/vvenc-fga-analysis-only.patch` (`--fga 4`: the three modes' analyses
+  without coding); vvdec is its master branch with pull
   request 450 (film grain for 4:2:2, 4:4:4 and 4:0:0).
 - The app (`packaging/package.py`) builds with CMake; Qt's DLLs come from
   windeployqt, FFmpeg's LGPL libraries from `native/ffmpeg`.

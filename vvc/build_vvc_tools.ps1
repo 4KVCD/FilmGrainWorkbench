@@ -1,18 +1,26 @@
 # Builds vvencapp and vvdecapp for the VVC grain analyzer and copies them to ..\bin.
 #
-# VVenC: fraunhoferhhi/vvenc pull request 765 (film grain analysis --fga 2 and 3),
-#        which contains pull request 764 (--fga 1, the VTM JVET-AN0237 port), with
-#        the film grain SEI written only where its parameters change and at random
-#        access points, and the parameters switching exactly at scene cuts; plus
-#        vvenc-fga-analysis-only.patch (this folder): --fga 4, the three modes'
-#        analyses without coding, for adding the grain to an encode made elsewhere.
+# VVenC: commit 1eb07fe0, master of the 4KVCD fork: fraunhoferhhi/vvenc master
+#        a455d51e (--fga 1 to 3, pull requests 764 and 765) with the 4KVCD pull
+#        requests not merged yet, among them the film grain analysis fixes (every
+#        shot analysed inside the shot, no grain on clipped highlights, black bars
+#        or clipped blacks; for --fga 2 and 3 no coarse grain on fast motion, more
+#        grain on Blu-ray sources whose grain repeats, grain on bright areas with no
+#        flat blocks, --fga 3's filter coefficients in [-128, 127] so FFmpeg decodes
+#        the streams, and the fit of each picture's grain to the grain its coding
+#        lost); plus vvenc-fga-analysis-only.patch (this folder): --fga 4, the three
+#        modes' analyses without coding, for adding the grain to an encode made
+#        elsewhere. --fga 4 codes nothing, so its grain is the analyzers' own, not
+#        fitted to any coding's loss. -VvencSource takes another clone holding them.
 # vvdec: fraunhoferhhi/vvdec master (with its film grain fixes, pull requests 414
 #        and 449), plus pull request 450 (film grain for 4:2:2, 4:4:4 and 4:0:0;
 #        4:2:0 unchanged), not merged yet.
 # Needs git, CMake and Visual Studio 2022 (or its Build Tools).
 param(
     [string]$WorkDir = (Join-Path $env:LOCALAPPDATA "afgs1wb-vvc-build"),
-    [string]$VvencRef = "a9fc370fe",   # head of pull request 765 (2026-10-21)
+    [string]$VvencSource = "https://github.com/4KVCD/vvenc.git",
+    [string]$VvencBranch = "master",
+    [string]$VvencRef = "1eb07fe0",    # the fork's master (2026-11-15)
     [string]$VvdecRef = "6f6bb29",     # vvdec master (2026-10-20)
     [string]$VvdecPatch = "428097930", # pull request 450's own commit (its first is 449, in master)
     [string]$VvencLocalPatch = "vvenc-fga-analysis-only.patch"
@@ -26,14 +34,14 @@ function Check($what) {
     if ($LASTEXITCODE -ne 0) { throw "$what failed (exit code $LASTEXITCODE)" }
 }
 
-# Checks out `ref` (from `fetch`), applies the commits of `patches` (from
-# `patch_fetch`) and the patch files `local_patches` (in this folder) to the
-# working tree without committing, and builds `target`.
+# Checks out `ref` (from `fetch` of `url`), applies the commits of `patches`
+# (from `patch_fetch`) and the patch files `local_patches` (in this folder) to
+# the working tree without committing, and builds `target`.
 function Build($name, $url, $fetch, $ref, $target, $patch_fetch = $null, $patches = @(), $local_patches = @()) {
     $src = Join-Path $WorkDir $name
     if (-not (Test-Path $src)) { git clone -q $url $src; Check "git clone $url" }
-    git -C $src fetch -q origin $fetch; Check "git fetch $fetch"
-    if ($patch_fetch) { git -C $src fetch -q origin $patch_fetch; Check "git fetch $patch_fetch" }
+    git -C $src fetch -q $url $fetch; Check "git fetch $fetch from $url"
+    if ($patch_fetch) { git -C $src fetch -q $url $patch_fetch; Check "git fetch $patch_fetch from $url" }
     git -C $src checkout -q -f $ref; Check "git checkout $ref"  # -f: drops patches applied by an earlier run
     foreach ($patch in $patches) {
         git -C $src cherry-pick --no-commit $patch; Check "applying $patch"
@@ -53,6 +61,6 @@ function Build($name, $url, $fetch, $ref, $target, $patch_fetch = $null, $patche
     Copy-Item "$src\bin\release-static\$target.exe" $bin -Force -ErrorAction Stop
 }
 
-Build "vvenc" "https://github.com/fraunhoferhhi/vvenc.git" "pull/765/head" $VvencRef "vvencapp" $null @() @($VvencLocalPatch)
+Build "vvenc" $VvencSource $VvencBranch $VvencRef "vvencapp" $null @() @($VvencLocalPatch)
 Build "vvdec" "https://github.com/fraunhoferhhi/vvdec.git" "master" $VvdecRef "vvdecapp" "pull/450/head" @($VvdecPatch)
 Write-Host "vvencapp.exe and vvdecapp.exe are in $bin"

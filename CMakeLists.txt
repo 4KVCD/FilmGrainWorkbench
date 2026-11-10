@@ -5,7 +5,7 @@
 #   cmake --build --preset windows-release
 #   ctest --preset windows-release
 cmake_minimum_required(VERSION 3.25)
-project(FilmGrainWorkbench VERSION 1.0.0 LANGUAGES CXX)
+project(FilmGrainWorkbench VERSION 1.1.0 LANGUAGES CXX)
 
 if(NOT WIN32 OR NOT MSVC)
     message(FATAL_ERROR "Film Grain Workbench is built on Windows with MSVC (Visual Studio 2022): "

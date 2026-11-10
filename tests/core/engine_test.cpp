@@ -50,6 +50,16 @@ TEST(Text, DecimalsWithoutExponents) {
     EXPECT_EQ(decimal_text(0.3127), "0.3127");
 }
 
+// VVenC takes --fgastrength as a factor in steps of 1/64 up to 255/64; the
+// window's percent goes to the nearest step, written exactly.
+TEST(VvencStrength, PercentToVvencsSteps) {
+    EXPECT_EQ(vvenc_strength(100), "1");
+    EXPECT_EQ(vvenc_strength(50), "0.5");
+    EXPECT_EQ(vvenc_strength(33), "0.328125");
+    EXPECT_EQ(vvenc_strength(0), "0");
+    EXPECT_EQ(vvenc_strength(400), "3.984375");
+}
+
 TEST(Rational, LimitsDenominatorsAsPython) {
     const json reference = load_reference("engine.json");
     ASSERT_FALSE(reference.at("fractions").empty());
