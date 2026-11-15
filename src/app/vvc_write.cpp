@@ -39,8 +39,8 @@ QString without_quotes(QString path) {
 }
 
 // What an analysis depends on, to use it again for a write with the same:
-// both files as they are on disk, the pairing, the settings and the VVenC
-// that analysed.
+// both files as they are on disk, their frame numbering, the pairing, the
+// settings and the VVenC that analysed.
 std::string analysis_key(const VideoInfo& source, const VideoInfo& encoded, std::int64_t offset,
                          const std::optional<Crop>& crop, const VvcCoding& coding, const std::string& vvencapp) {
     std::string key;
@@ -56,7 +56,7 @@ std::string analysis_key(const VideoInfo& source, const VideoInfo& encoded, std:
     if (crop) {
         key += format("|%d,%d,%d,%d", crop->width, crop->height, crop->x, crop->y);
     }
-    return key;
+    return key + numbering_key(source, encoded);
 }
 
 // Whether the two frame rates pair frames one to one.

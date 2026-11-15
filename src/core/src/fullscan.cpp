@@ -80,7 +80,7 @@ std::string cache_key(const VideoInfo& source, const VideoInfo& encoded, std::in
     key += std::to_string(offset) + "||" +
            (crop ? format("Crop(width=%d, height=%d, x=%d, y=%d)", crop->width, crop->height, crop->x, crop->y)
                  : std::string("None")) +
-           "||analyzer-v2";
+           "||analyzer-v2" + numbering_key(source, encoded);
     return sha1_hex(key).substr(0, 16);
 }
 

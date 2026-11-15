@@ -135,6 +135,19 @@ TEST(Probe, ReadsFfprobesAnswersAndBuildsCommandsAsPython) {
     // MPEG-TS packets carry side data: ffprobe's CSV lines end in a comma.
     // The Python app read none of them, so a VVC .ts did not open.
     EXPECT_EQ(earliest_time("2.400000,\n2.358000,\n2.441000,\n"), 2.358);
+    // Only a stream with pictures before its first packet's needs its first frames decoded
+    // (a cut at an open-GOP keyframe: the decoder skips them); "frame=pts_time" lines end in commas.
+    EXPECT_EQ(packets_of_leading_pictures("0.042000\n0.000000\n0.209000\n"), 2);
+    EXPECT_EQ(packets_of_leading_pictures("0.292000\n0.125000\nN/A\n0.000000\n1.627000\n"), 4);
+    EXPECT_EQ(packets_of_leading_pictures("N/A\n0.000000\n0.083000\n0.042000\n"), 0);
+    EXPECT_EQ(packets_of_leading_pictures(""), 0);
+    EXPECT_EQ(earliest_time("0.042000,,,,\n0.084000,,,,\n"), 0.042);
+    // Kept analyses of videos numbered as before stay valid; those of a video with skipped pictures do not.
+    VideoInfo plain;
+    VideoInfo cut;
+    cut.leading_skipped = true;
+    EXPECT_EQ(numbering_key(plain, plain), "");
+    EXPECT_NE(numbering_key(cut, plain), numbering_key(plain, cut));
     for (const json& c : reference.at("probe").at("crops")) {
         VideoInfo source;
         source.width = c.at("source").at(0);

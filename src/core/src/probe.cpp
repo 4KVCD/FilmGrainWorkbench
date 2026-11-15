@@ -112,6 +112,30 @@ std::optional<double> earliest_time(std::string_view csv) {
     return earliest;
 }
 
+std::string numbering_key(const VideoInfo& source, const VideoInfo& encoded) {
+    if (!source.leading_skipped && !encoded.leading_skipped) {
+        return {};
+    }
+    return std::string("|frame 0 shown:") + (source.leading_skipped ? "s" : "") + (encoded.leading_skipped ? "e" : "");
+}
+
+int packets_of_leading_pictures(std::string_view packet_csv) {
+    std::optional<double> first;
+    int packets = 0;
+    int through_last_earlier = 0;
+    std::istringstream lines{std::string(packet_csv)};
+    for (std::string word; lines >> word;) {
+        packets++;
+        word.erase(std::min(word.size(), word.find(',')));
+        const std::optional<double> time = to_double(word);
+        if (time && first && *time < *first) {
+            through_last_earlier = packets;
+        }
+        first = first ? first : time;
+    }
+    return through_last_earlier;
+}
+
 VideoInfo parse_probe(const std::filesystem::path& path, const json& data, double first_pts) {
     const json* stream = nullptr;
     for (const json& s : array_member(data, "streams")) {
@@ -209,23 +233,43 @@ VideoInfo parse_probe(const std::filesystem::path& path, const json& data, doubl
 
 namespace {
 
-// The smallest presentation time among the first packets. ffprobe's
-// start_time is the first packet's in decode order, which for B-picture
-// streams can be later than the first frame shown (ffmpeg's own libvvenc
-// MKVs report 0.958 s for a stream that starts at 0); seeking relative to it
-// lands on the wrong frame.
-double first_presentation_time(const std::string& ffprobe, const std::filesystem::path& path, int stream,
-                               CancelToken* cancel) {
-    const std::string out = run_tool({ffprobe, "-v", "error", "-select_streams", std::to_string(stream),
-                                      "-read_intervals", "%+#96", "-show_entries", "packet=pts_time", "-of",
-                                      "csv=p=0", utf8(path)},
-                                     cancel)
-                                .standard_output;
-    const std::optional<double> earliest = earliest_time(out);
+// The time of the first frame a decoder shows. ffprobe's start_time is the
+// first packet's in decode order, which for B-picture streams can be later
+// than the first frame shown (ffmpeg's own libvvenc MKVs report 0.958 s for a
+// stream that starts at 0); seeking relative to it lands on the wrong frame.
+// So the smallest time among the first packets is taken. Where pictures come
+// before the first packet's, they are only shown if they can be decoded: a
+// film cut at an open-GOP keyframe starts with pictures that refer to the
+// part cut away, which every decoder skips (an mkvmerge cut of a Blu-ray: the
+// keyframe at 0.042 s, a skipped picture at 0). Counting such a picture as
+// frame 0 put every frame one late and made frame 0 a copy of frame 1, where
+// VVenC's analysis then measured no grain. For those streams the packets up
+// to the last such picture are decoded (2 to 8 as a rule, under a second at
+// 4K) and the earliest frame shown counts.
+struct FirstFrame {
+    double time = 0;
+    bool leading_skipped = false;  // later than the earliest packet: the pictures before it are skipped
+};
+
+FirstFrame first_presentation_time(const std::string& ffprobe, const std::filesystem::path& path, int stream,
+                                   CancelToken* cancel) {
+    const auto first_times = [&](const char* entries, int packets) {
+        return run_tool({ffprobe, "-v", "error", "-select_streams", std::to_string(stream), "-read_intervals",
+                         "%+#" + std::to_string(packets), "-show_entries", entries, "-of", "csv=p=0", utf8(path)},
+                        cancel)
+            .standard_output;
+    };
+    const std::string packets = first_times("packet=pts_time", 96);
+    const std::optional<double> earliest = earliest_time(packets);
     if (!earliest) {
         throw ToolError(file_name(path) + ": no packet timestamps found");
     }
-    return *earliest;
+    if (const int leading = packets_of_leading_pictures(packets)) {
+        // a stream whose frames carry no times keeps the packets' earliest
+        const double shown = earliest_time(first_times("frame=pts_time", leading)).value_or(*earliest);
+        return {shown, shown > *earliest};
+    }
+    return {*earliest, false};
 }
 
 }  // namespace
@@ -246,7 +290,10 @@ VideoInfo probe(const std::filesystem::path& path, const std::string& ffprobe, C
     // The stream's index first, for the packet times; then everything with
     // them (an MPEG-TS duration depends on the first time).
     const int stream = parse_probe(path, data, 0.0).stream_index;
-    return parse_probe(path, data, first_presentation_time(ffprobe, path, stream, cancel));
+    const FirstFrame first = first_presentation_time(ffprobe, path, stream, cancel);
+    VideoInfo info = parse_probe(path, data, first.time);
+    info.leading_skipped = first.leading_skipped;
+    return info;
 }
 
 }  // namespace fgw
