@@ -309,9 +309,9 @@ std::pair<std::vector<std::string>, std::vector<std::string>> pipeline_commands(
         return format("settb=%lld/%lld,setpts='round((T-%.6f)*%lld/%lld)%+lld'", fps.den, fps.num, info.first_pts,
                       fps.num, fps.den, -shift);
     };
-    const std::string graph = format("[0:%d]", source.stream_index) + filter_chain(source, g, crop) + "," +
+    const std::string graph = format("[0:%d]", source.stream_index) + stack_filter_chain(source, g, crop) + "," +
                               number(source, offset) + "[s];" + format("[1:%d]", encoded.stream_index) +
-                              filter_chain(encoded, g, std::nullopt) + "," + number(encoded, 0) + "[e];" +
+                              stack_filter_chain(encoded, g, std::nullopt) + "," + number(encoded, 0) + "[e];" +
                               "[s][e]vstack=inputs=2:shortest=1[o]";
     std::vector<std::string> ffmpeg = {tools.ffmpeg, "-v", "error", "-nostdin"};
     if (source_hwaccel) {

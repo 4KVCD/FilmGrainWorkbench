@@ -24,6 +24,13 @@ std::optional<Crop> source_crop_for(const VideoInfo& source, const VideoInfo& en
 // ffmpeg's -vf chain: crop, scale to `target`'s size, convert to its layout.
 std::string filter_chain(const VideoInfo& info, const Geometry& target, const std::optional<Crop>& crop);
 
+// filter_chain for one input of a filter that joins two (vstack), with the
+// colour tags cleared after it, so that the join keeps every pixel: FFmpeg
+// gives all inputs of a join one colourspace and range and converts an input
+// tagged otherwise (a BT.709 source stacked over an untagged encode had its
+// luma converted). Clearing changes tags only, not pixels.
+std::string stack_filter_chain(const VideoInfo& info, const Geometry& target, const std::optional<Crop>& crop);
+
 // Input options that make ffmpeg start exactly at frame `index`; use with
 // -copyts. The seek goes to half a frame before the frame on the file's own
 // timeline, and accurate seeking drops everything earlier. With -copyts

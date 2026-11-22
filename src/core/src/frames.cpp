@@ -44,6 +44,11 @@ std::string filter_chain(const VideoInfo& info, const Geometry& target, const st
     return chain + "format=" + target.pix_fmt();
 }
 
+std::string stack_filter_chain(const VideoInfo& info, const Geometry& target, const std::optional<Crop>& crop) {
+    return filter_chain(info, target, crop) +
+           ",setparams=range=unknown:color_primaries=unknown:color_trc=unknown:colorspace=unknown";
+}
+
 std::vector<std::string> seek_args(const VideoInfo& info, std::int64_t index) {
     const double seconds = info.first_pts + (static_cast<double>(index) - 0.5) / info.fps.value() - info.start_time;
     return {"-seek_timestamp", "1", "-ss", format("%.6f", seconds)};

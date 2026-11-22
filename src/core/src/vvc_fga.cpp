@@ -198,9 +198,9 @@ FgaAnalysis analyse_film_grain(const Tools& tools, const VvcTools& vvc_tools, co
         return format("settb=%lld/%lld,setpts='round((T-%.6f)*%lld/%lld)%+lld'", fps.den, fps.num, info.first_pts,
                       fps.num, fps.den, -shift);
     };
-    const std::string graph = format("[0:%d]", source.stream_index) + filter_chain(source, g, crop) + "," +
+    const std::string graph = format("[0:%d]", source.stream_index) + stack_filter_chain(source, g, crop) + "," +
                               number(source, first + offset) + "[s];" + format("[1:%d]", encoded.stream_index) +
-                              filter_chain(encoded, g, std::nullopt) + "," + number(encoded, first) + "[e];" +
+                              stack_filter_chain(encoded, g, std::nullopt) + "," + number(encoded, first) + "[e];" +
                               "[s][e]vstack=inputs=2:shortest=1[o]";
     std::vector<std::string> ffmpeg = {tools.ffmpeg, "-v", "error", "-nostdin", "-progress", "pipe:2", "-copyts"};
     for (std::string& arg : seek_args(source, first + offset)) {
