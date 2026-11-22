@@ -81,6 +81,11 @@ struct GrainSet {
     std::string describe() const;
 };
 
+// The parameters of one FGC SEI payload (emulation prevention bytes
+// removed); nothing for a cancel message. Throws std::out_of_range for a
+// payload cut short.
+std::optional<GrainSet> parse_fgc_payload(std::span<const std::uint8_t> payload);
+
 // The film grain parameters in force for every picture of an Annex B
 // bitstream, in display order (from each picture's order count, derived as
 // vvdec does). A picture without a message keeps the previous parameters

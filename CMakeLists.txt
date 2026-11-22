@@ -1,5 +1,6 @@
 # Film Grain Workbench: the engine (fgw_core), the processes it runs
-# (fgw_platform), the window (FilmGrainWorkbench) and their tests.
+# (fgw_platform), the window (FilmGrainWorkbench), the command-line
+# fga-inject and their tests.
 #
 #   cmake --preset windows -DCMAKE_PREFIX_PATH=<Qt>\6.12.0\msvc2022_64
 #   cmake --build --preset windows-release
@@ -35,6 +36,7 @@ target_include_directories(nlohmann_json SYSTEM INTERFACE third_party/nlohmann/i
 
 add_subdirectory(src/platform)
 add_subdirectory(src/core)
+add_subdirectory(src/cli)
 if(FGW_BUILD_APP)
     add_subdirectory(src/app)
 endif()

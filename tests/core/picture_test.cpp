@@ -136,6 +136,18 @@ TEST(VvcFga, PlacesTheMessagesAsVvenc) {
     EXPECT_TRUE(placement.needed(60, vvc::nal_radl, false));
 }
 
+// fga-inject refuses the encode's options that the analysis sets itself, in any of vvencapp's spellings.
+TEST(VvcFga, KnowsTheOptionsTheAnalysisSets) {
+    for (const char* owned : {"-i", "--input", "-o", "--size=1920x1080", "--FrameRate", "-f", "--frames=20", "--y4m",
+                              "--fga", "--FGAStacked=1", "--internal-bitdepth"}) {
+        EXPECT_TRUE(is_analysis_owned_vvenc_option(owned)) << owned;
+    }
+    for (const char* other : {"--qp", "--preset=fast", "--refreshsec", "-t", "--hdr", "-b", "--fgastrength", "23",
+                              "fast"}) {
+        EXPECT_FALSE(is_analysis_owned_vvenc_option(other)) << other;
+    }
+}
+
 // The encode's own film grain messages go, its other messages stay; an end of sequence is seen.
 TEST(VvcFga, ReplacesTheEncodesMessages) {
     const auto packet_of = [](const std::vector<std::vector<std::uint8_t>>& nals) {

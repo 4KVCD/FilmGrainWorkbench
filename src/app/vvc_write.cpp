@@ -444,7 +444,8 @@ void VvcTab::write_or_cancel() {
             const RemovedFolder work{folder};
             std::filesystem::create_directories(folder);
             analysis = std::make_shared<const FgaAnalysis>(analyse_film_grain(
-                tools, vvc_tools, source, encoded, offset, crop, coding, folder, step_progress(""), &cancel));
+                tools, vvc_tools, source, encoded, offset, crop, vvenc_coding_args(coding, source), folder,
+                step_progress(""), &cancel));
             keep_analysis(kept_files, folder / "fga-segments.266", key, *analysis);
         }
         done->analysed = true;

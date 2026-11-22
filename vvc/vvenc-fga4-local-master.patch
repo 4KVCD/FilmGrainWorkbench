@@ -1,0 +1,1005 @@
+From 403fc076392085105dde2bb500c0862a796fd50d Mon Sep 17 00:00:00 2001
+From: Film Grain Workbench <noreply@4kvcd.invalid>
+Date: Sun, 15 Nov 2026 05:42:15 -0500
+Subject: [PATCH] --fga 4: the three film grain analyses without coding
+
+For Film Grain Workbench, which adds VVenC's film grain parameters to a
+VVC encode made elsewhere. Applies to the local VVenC master 066f71fb
+(upstream master with the open 4KVCD pull requests, among them the film
+grain analysis work; equal to the 4KVCD fork's master). --fga 4 runs the analyzers of --fga 1, 2 and 3 on
+the same pictures, each with its own parameter sets, as each does on its
+own: --fga 1 without the temporal residual, and without the analysis of
+the picture after a shot start that restarts the shot's statistics in
+--fga 2 and 3, so each mode keeps its own previously analysed picture
+for the scene cuts and the POC its sets apply from. It codes nothing:
+pictures take the first pass's skip path, and ALF and rate control are
+off (both would wait for coded pictures; neither touches MCTF or the
+analysis). The output holds, for every picture, an access unit
+delimiter (EncLib waits for a non-empty access unit after each input
+picture), and after each analysis, for each mode that analysed the
+picture, a user data unregistered SEI (UUID
+393cc818-0a4b-4cef-8e2d-f1605b9577c0; data: the mode, then the POC from
+which the set applies, big-endian) followed by the FGC SEI message of
+that parameter set. MCTF does only the analysis's work, on the pictures
+the analysis looks at: motion estimation, the analysis's filter and the
+temporal residual, not the encoding's filtering, nor the noise levels,
+SCC detection and block importance that serve the coding. --fga 1 to 3
+write the same streams as before.
+
+--fgastacked 1 (with --fga 4 only): every input picture is twice the
+height given, the source picture on top of the decoded encode the grain
+is for. --fga 2's and 3's sets are then also fitted, picture by picture,
+to the grain that encode lost, as a real encode fits its own
+(xScaleToLostGrain, now on a state per mode): each fitted set follows a
+marker whose mode byte is 128 + the mode and whose POC is the picture's
+own. The spectra are computed on input over the source's size and kept
+with the picture until its SEIs are written. Without --fgastacked,
+--fga 4's sets are the analyzers' own (the fit needs a reconstruction).
+Checked: the source over the decoded --fga 2 and 3 encodes of 96
+pictures of a 1080p HDR film (QP 28, preset faster) gives fitted sets
+byte-identical to those encodes' own, 96 of 96 in both modes; --fga 1
+to 4 write byte-identical streams without --fgastacked.
+
+Also: SEIuserDataUnregistered frees its data with delete[], as an array.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ include/vvenc/vvencCfg.h          |   3 +-
+ source/App/vvencapp/vvencapp.cpp  |  17 +-
+ source/Lib/CommonLib/MCTF.cpp     |  15 +-
+ source/Lib/CommonLib/SEI.h        |   2 +-
+ source/Lib/EncoderLib/EncGOP.cpp  | 335 +++++++++++++++++++++---------
+ source/Lib/EncoderLib/EncGOP.h    | 125 +++++++----
+ source/Lib/EncoderLib/EncLib.cpp  |   4 +
+ source/Lib/EncoderLib/EncStage.h  |   4 +
+ source/Lib/apputils/VVEncAppCfg.h |   3 +-
+ source/Lib/vvenc/vvencCfg.cpp     |  11 +-
+ 10 files changed, 368 insertions(+), 151 deletions(-)
+
+diff --git a/include/vvenc/vvencCfg.h b/include/vvenc/vvencCfg.h
+index 6836233e..55a1d634 100644
+--- a/include/vvenc/vvencCfg.h
++++ b/include/vvenc/vvencCfg.h
+@@ -768,7 +768,8 @@ typedef struct vvenc_config
+   int                 m_explicitAPSid;
+ 
+   bool                m_picReordering;
+-  int8_t              m_fga;                                                             // Film grain analysis: 0 disabled (default), 1 the analysis of VTM (JVET-AN0237), 2 the same with improvements, 3 like 2 with the auto-regressive grain model
++  int8_t              m_fga;                                                             // Film grain analysis: 0 disabled (default), 1 the analysis of VTM (JVET-AN0237), 2 the same with improvements, 3 like 2 with the auto-regressive grain model, 4 the three modes' analyses without coding
++  bool                m_fgaStacked;                                                      // fga 4: each input picture's planes continue below it with a decoded encode, to which fga 2's and 3's sets are also fitted per picture
+   int8_t              m_poc0idr;                                                         // encoding with first IRAP at POC 0 (0: off, 1: on, -1: default automatic setting (on for idr_no_radl, disabled picture reorderding and non-first segments; off otherwise))
+   int8_t              m_ifpLines;
+   int8_t              m_blockImportanceMapping;                                          // block importance mapping, the QP of blocks that later pictures predict from (0: off,
+diff --git a/source/App/vvencapp/vvencapp.cpp b/source/App/vvencapp/vvencapp.cpp
+index fdbd4508..77f4a266 100644
+--- a/source/App/vvencapp/vvencapp.cpp
++++ b/source/App/vvencapp/vvencapp.cpp
+@@ -288,9 +288,19 @@ int main( int argc, char* argv[] )
+   vvenc_accessUnit_alloc_payload( &AU, auSizeScale * vvenccfg.m_SourceWidth * vvenccfg.m_SourceHeight + 1024 );
+ 
+   // --- allocate memory for YUV input picture
++  // (with --fgastacked twice as tall: the source picture on top of the decoded encode, read as one, given to the
++  // encoder as the source picture whose planes continue with the encode's)
+   vvencYUVBuffer cYUVInputBuffer;
+   vvenc_YUVBuffer_default( &cYUVInputBuffer );
+-  vvenc_YUVBuffer_alloc_buffer( &cYUVInputBuffer, vvenccfg.m_internChromaFormat, vvenccfg.m_SourceWidth, vvenccfg.m_SourceHeight );
++  const int readHeight = vvenccfg.m_fgaStacked ? 2 * vvenccfg.m_SourceHeight : vvenccfg.m_SourceHeight;
++  vvenc_YUVBuffer_alloc_buffer( &cYUVInputBuffer, vvenccfg.m_internChromaFormat, vvenccfg.m_SourceWidth, readHeight );
++  const auto setPlaneHeights = [ &cYUVInputBuffer, &vvenccfg ]( int frameHeight )
++  {
++    for( int i = 0; i < 3; i++ )
++    {
++      cYUVInputBuffer.planes[ i ].height = vvenc_get_height_of_component( vvenccfg.m_internChromaFormat, frameHeight, i );
++    }
++  };
+ 
+   // --- start timer
+   std::chrono::steady_clock::time_point cTPStartRun = std::chrono::steady_clock::now();
+@@ -377,7 +387,10 @@ int main( int argc, char* argv[] )
+       vvencYUVBuffer* ptrYUVInputBuffer = nullptr;
+       if( !bEof )
+       {
+-        if( 0 != cYuvFileInput.readYuvBuf( cYUVInputBuffer, bEof ) )
++        setPlaneHeights( readHeight );
++        const int readResult = cYuvFileInput.readYuvBuf( cYUVInputBuffer, bEof );
++        setPlaneHeights( vvenccfg.m_SourceHeight );
++        if( 0 != readResult )
+         {
+           msgApp( nullptr, VVENC_ERROR, "vvencapp [error]: read file failed: %s\n",cYuvFileInput.getLastError().c_str() );
+           vvenc_YUVBuffer_free_buffer( &cYUVInputBuffer );
+diff --git a/source/Lib/CommonLib/MCTF.cpp b/source/Lib/CommonLib/MCTF.cpp
+index ec0c0fce..bb2cea49 100644
+--- a/source/Lib/CommonLib/MCTF.cpp
++++ b/source/Lib/CommonLib/MCTF.cpp
+@@ -952,7 +952,10 @@ void MCTF::filter( const std::deque<Picture*>& picFifo, int filterIdx )
+   int dropFramesFront = std::min( std::max(                                          filterIdx - filterFrames, 0 ), dropFrames + 2 );
+   int dropFramesBack  = std::min( std::max( static_cast<int>( picFifo.size() ) - 1 - filterIdx - filterFrames, 0 ), dropFrames + 2 );
+ 
+-  if ( isFilterThisFrame || fgaOnly )
++  // --fga 4 codes nothing: of MCTF's work only the film grain analysis's, on the pictures it looks at, is used
++  const bool analysisOnly = m_encCfg->m_fga == 4 && m_isFinalPass;
++
++  if ( ( isFilterThisFrame || fgaOnly ) && ( !analysisOnly || fgaPicture ) )
+   {
+     bool  useMCTFadaptation = true;
+     const bool condAddLevel = useMCTFadaptation && m_area.width >= 1920;
+@@ -1085,8 +1088,8 @@ void MCTF::filter( const std::deque<Picture*>& picFifo, int filterIdx )
+       }
+     }
+ 
+-    // filter
+-    if( isFilterThisFrame && pic->useMCTF )
++    // filter (for the encoding)
++    if( isFilterThisFrame && pic->useMCTF && !analysisOnly )
+     {
+       fltrBuf.create( m_encCfg->m_internChromaFormat, m_area, 0, MCTF_FRAME_MARGIN );
+       filterAndKeepDetail( origBuf, srcFrameInfo, fltrBuf, filterStrength );
+@@ -1116,7 +1119,7 @@ void MCTF::filter( const std::deque<Picture*>& picFifo, int filterIdx )
+     if( fgaPicture )
+     {
+       static constexpr double FGA_FILTER_STRENGTH = 1.5;
+-      if( isFilterThisFrame && pic->useMCTF && filterStrength == FGA_FILTER_STRENGTH )
++      if( isFilterThisFrame && pic->useMCTF && filterStrength == FGA_FILTER_STRENGTH && !analysisOnly )
+       {
+         // the picture filtered for the encoding is exactly the one the analysis needs (from QP 20 on with MCTFLevelTilt
+         // off; the tilt raises the upper temporal levels' strength, so for those the analysis filters its own copy)
+@@ -1134,6 +1137,10 @@ void MCTF::filter( const std::deque<Picture*>& picFifo, int filterIdx )
+       pic->m_picShared->fgaResidualWeight() = m_encCfg->m_fga >= 2
+         ? fgaTemporalResidual( origBuf, pic->poc, picFifo, srcFrameInfo, pic->m_picShared->getFgaResidualBuf() ) : 0;
+     }
++    if( analysisOnly )
++    {
++      return;   // the rest (noise levels, SCC detection, block importance) serves the coding only
++    }
+ 
+     if( isFilterThisFrame && ( m_encCfg->hasBlockQpOffsets() || m_encCfg->m_usePerceptQPA || pic->gopEntry->m_isStartOfGop ) )
+     {
+diff --git a/source/Lib/CommonLib/SEI.h b/source/Lib/CommonLib/SEI.h
+index d1f7fceb..8042f02b 100644
+--- a/source/Lib/CommonLib/SEI.h
++++ b/source/Lib/CommonLib/SEI.h
+@@ -242,7 +242,7 @@ public:
+ 
+   virtual ~SEIuserDataUnregistered()
+   {
+-    delete userData;
++    delete[] userData;
+   }
+ 
+   uint8_t   uuid_iso_iec_11578[ISO_IEC_11578_LEN];
+diff --git a/source/Lib/EncoderLib/EncGOP.cpp b/source/Lib/EncoderLib/EncGOP.cpp
+index c028773d..e9ef0292 100644
+--- a/source/Lib/EncoderLib/EncGOP.cpp
++++ b/source/Lib/EncoderLib/EncGOP.cpp
+@@ -199,14 +199,24 @@ void EncGOP::init( const VVEncCfg& encCfg, const GOPCfg* gopCfg, RateCtrl& rateC
+   if ( encCfg.m_fga )
+   {
+     // --fga 1: VTM's analysis with its bugs fixed; --fga 2: with the improvements beyond VTM; --fga 3: --fga 2 with the
+-    // auto-regressive grain model
+-    m_fgAnalyzer.init( m_pcEncCfg->m_PadSourceWidth, m_pcEncCfg->m_PadSourceHeight, m_pcEncCfg->m_internChromaFormat,
+-                         m_pcEncCfg->m_internalBitDepth, m_pcEncCfg->m_fg.m_fgcSEICompModelPresent, encCfg.m_fga == 2, encCfg.m_fga == 3 );
+-    // one analysis every m_fgaInterval pictures of a GOP (automatic: the GOP size, its first picture only), which the
+-    // configuration check makes a divisor of the GOP size
+-    m_fgAnalyzer.setAnalysisSpacing( encCfg.m_fgaInterval, encCfg.m_GOPSize );
++    // auto-regressive grain model; --fga 4: all three without coding
++    for( int fga = 1; fga <= 3; fga++ )
++    {
++      if( encCfg.m_fga != fga && encCfg.m_fga < 4 )
++      {
++        continue;
++      }
++      m_fgaModes.emplace_back( new FgaMode );
++      FgaMode& mode = *m_fgaModes.back();
++      mode.fga      = fga;
++      mode.analyzer.init( m_pcEncCfg->m_PadSourceWidth, m_pcEncCfg->m_PadSourceHeight, m_pcEncCfg->m_internChromaFormat,
++                          m_pcEncCfg->m_internalBitDepth, m_pcEncCfg->m_fg.m_fgcSEICompModelPresent, fga == 2, fga == 3 );
++      // one analysis every m_fgaInterval pictures of a GOP (automatic: the GOP size, its first picture only), which the
++      // configuration check makes a divisor of the GOP size
++      mode.analyzer.setAnalysisSpacing( encCfg.m_fgaInterval, encCfg.m_GOPSize );
++      mode.byStartPoc[ std::numeric_limits<int>::min() ] = FilmGrainParam( mode.analyzer, m_pcEncCfg->m_fgaStrength );   // no grain, until the first analysis measures it
++    }
+     m_fgcParamSets = std::max<size_t>( 8, 2 * ( encCfg.m_GOPSize / encCfg.m_fgaInterval ) + 2 );
+-    m_fgcByStartPoc[ std::numeric_limits<int>::min() ] = FilmGrainParam( m_fgAnalyzer, m_pcEncCfg->m_fgaStrength );   // no grain, until the first analysis measures it
+   }
+ 
+   if( !m_pcEncCfg->m_poc0idr )
+@@ -795,8 +805,8 @@ void EncGOP::xSyncAlfAps( Picture& pic )
+ 
+ void EncGOP::xEncodePicture( Picture* pic, EncPicture* picEncoder )
+ {
+-  // first pass temporal down-sampling
+-  if( ( ! m_pcRateCtrl->rcIsFinalPass || m_isPreAnalysis ) && pic->gopEntry->m_skipFirstPass )
++  // first pass temporal down-sampling; the film grain analysis without coding
++  if( ( ( ! m_pcRateCtrl->rcIsFinalPass || m_isPreAnalysis ) && pic->gopEntry->m_skipFirstPass ) || m_pcEncCfg->m_fga == 4 )
+   {
+     pic->isReconstructed = true;
+     pic->isEncoded       = true;
+@@ -1766,13 +1776,27 @@ void EncGOP::xIssueFgaTask( Picture& pic, int codingNum )
+   // The result applies from the picture after the previously analysed one; when PreProcess found a scene cut in
+   // between, from the cut, so that the pictures before it keep the parameters of their scene. The first analysis
+   // applies to all pictures before it as well. Pictures already written keep theirs (xAddFilmGrainParameters). The
+-  // analysis of the picture after a shot start restarts the shot's statistics without the start's one-sided
+-  // analysis (MCTF::filter), from this picture on.
+-  const bool first  = m_fgaPrevAnalysedPoc == std::numeric_limits<int>::min();
+-  const int  cutPoc = pic.m_picShared->fgaSceneCut() ? pic.poc : pic.m_picShared->fgaLastSceneCutPoc();
+-  const bool newCut = cutPoc > m_fgaPrevAnalysedPoc;
+-  task->sceneCut    = !first && ( newCut || pic.m_picShared->fgaShotRestart() );
+-  task->startPoc    = first ? std::numeric_limits<int>::min() : newCut ? cutPoc : m_fgaPrevAnalysedPoc + 1;
++  // analysis of the picture after a shot start restarts the shot's
++  // statistics without the start's one-sided analysis (MCTF::filter), from this picture on. That restart is --fga 2's
++  // and 3's only: in --fga 4, --fga 1 skips a picture analysed only as a restart, as on its own.
++  const int  cutPoc      = pic.m_picShared->fgaSceneCut() ? pic.poc : pic.m_picShared->fgaLastSceneCutPoc();
++  const bool restart     = pic.m_picShared->fgaShotRestart();
++  const bool restartOnly = restart && !( pic.gopEntry->m_isStartOfGop || pic.gopEntry->m_isFgaPicture || pic.poc == 0
++                                         || pic.m_picShared->fgaSceneCut() );
++  for( auto& mode : m_fgaModes )
++  {
++    FgaTask::ModeResult result;
++    result.analysed = mode->fga >= 2 || !restartOnly;
++    if( result.analysed )
++    {
++      const bool first     = mode->prevAnalysedPoc == std::numeric_limits<int>::min();
++      const bool newCut    = cutPoc > mode->prevAnalysedPoc;
++      result.sceneCut      = !first && ( newCut || ( restart && mode->fga >= 2 ) );
++      result.startPoc      = first ? std::numeric_limits<int>::min() : newCut ? cutPoc : mode->prevAnalysedPoc + 1;
++      mode->prevAnalysedPoc = pic.poc;
++    }
++    task->results.push_back( result );
++  }
+   m_fgaPrevAnalysedPoc = pic.poc;
+   const Barrier* previous = m_fgaLast ? &m_fgaLast->counter.done : nullptr;
+   m_fgaLast = task;
+@@ -1802,21 +1826,31 @@ void EncGOP::xRunFgaTask( FgaTask& task )
+   const int residualWeight  = shared->fgaResidualWeight();
+   const bool ownBuf         = fgaBuf.valid();
+   const CPelUnitBuf denoised = ownBuf ? CPelUnitBuf( fgaBuf ) : CPelUnitBuf( task.pic->getFilteredOrigBuffer() );
+-  if( residualWeight )
+-  {
+-    const CPelUnitBuf residual( residualBuf );
+-    m_fgAnalyzer.estimateGrainParameters( task.pic->getOrigBuffer(), denoised, &residual, residualWeight, task.sceneCut );
+-  }
+-  else
++  for( size_t m = 0; m < m_fgaModes.size(); m++ )
+   {
+-    m_fgAnalyzer.estimateGrainParameters( task.pic->getOrigBuffer(), denoised, nullptr, 0, task.sceneCut );
++    FgaMode& mode              = *m_fgaModes[ m ];
++    FgaTask::ModeResult& result = task.results[ m ];
++    if( !result.analysed )
++    {
++      continue;
++    }
++    // MCTF computes the temporal residual for --fga 2 and up; --fga 1 does without it, also as part of --fga 4
++    if( residualWeight && mode.fga >= 2 )
++    {
++      const CPelUnitBuf residual( residualBuf );
++      mode.analyzer.estimateGrainParameters( task.pic->getOrigBuffer(), denoised, &residual, residualWeight, result.sceneCut );
++    }
++    else
++    {
++      mode.analyzer.estimateGrainParameters( task.pic->getOrigBuffer(), denoised, nullptr, 0, result.sceneCut );
++    }
++    result.param = FilmGrainParam( mode.analyzer, m_pcEncCfg->m_fgaStrength );
+   }
+   residualBuf.destroy();
+   if( ownBuf )
+   {
+     fgaBuf.destroy();
+   }
+-  task.result = FilmGrainParam( m_fgAnalyzer, m_pcEncCfg->m_fgaStrength );
+ }
+ 
+ // Whether a film grain analysis of the picture may still read its source.
+@@ -2733,6 +2767,16 @@ void EncGOP::xWritePicture( Picture& pic, AccessUnitList& au, bool isEncodeLtRef
+     return;
+   }
+ 
++  if( m_pcEncCfg->m_fga == 4 )
++  {
++    // An access unit delimiter for every picture: EncLib waits for a non-empty access unit after each input picture
++    // (with none, it would wait for good after the last one, before the flush that drains the rest).
++    au.poc = pic.poc;
++    xWriteAccessUnitDelimiter( au, pic.slices[ 0 ], pic.slices[ 0 ]->isIRAP(), m_HLSWriter );
++    xWriteFilmGrainSegments( pic, au );
++    return;
++  }
++
+   DTRACE_UPDATE( g_trace_ctx, std::make_pair( "bsfinal", 1 ) );
+   pic.encTime.startTimer();
+ 
+@@ -2910,13 +2954,13 @@ static bool sameFilmGrainCharacteristics( const SeiFgc& a, const SeiFgc& b )
+ // Adds the parameter set of a finished analysis. vvdec keeps synthesizing the grain of a component that a later SEI
+ // marks as absent (fixed by its pull request 414, open in October 2026), so once a component had grain, a parameter set
+ // without it signals one interval with scaling factor 0 instead.
+-void EncGOP::xAddFilmGrainParameters( const FgaTask& task )
++void EncGOP::xAddFilmGrainParameters( FgaMode& mode, const FilmGrainParam& result, int startPoc )
+ {
+-  FilmGrainParam param = task.result;
++  FilmGrainParam param = result;
+   for( int c = 0; c < MAX_NUM_COMP; c++ )
+   {
+     SeiFgc::CompModel& cm = param.compModel[ c ];
+-    if( m_pcEncCfg->m_fga && !cm.presentFlag && m_fgcCompSignalled[ c ] )
++    if( !cm.presentFlag && mode.compSignalled[ c ] )
+     {
+       cm.presentFlag           = true;
+       cm.numIntensityIntervals = 1;
+@@ -2926,7 +2970,7 @@ void EncGOP::xAddFilmGrainParameters( const FgaTask& task )
+       cm.intensityValues[ 0 ].intensityIntervalUpperBound = 255;
+       cm.intensityValues[ 0 ].compModelValue.assign( 1, 0 );
+     }
+-    m_fgcCompSignalled[ c ] = m_fgcCompSignalled[ c ] || cm.presentFlag;
++    mode.compSignalled[ c ] = mode.compSignalled[ c ] || cm.presentFlag;
+   }
+   // A set cannot apply to pictures whose access units are written already, so that xFilmGrainSeiNeeded, which compares
+   // a picture's set with the previous picture's, sees every change. In low delay (coding order = output order) the
+@@ -2934,33 +2978,33 @@ void EncGOP::xAddFilmGrainParameters( const FgaTask& task )
+   // it, compare equal with itself and never be signalled. In random access the analysed picture is coded before the
+   // rest of its GOP, so its set already starts after every written picture; the one exception, an IDR without leading
+   // pictures (idr_no_radl), coded after the pictures before it in output order, carries the message anyway.
+-  int startPoc = task.startPoc;
+-  if( !m_fgcWrittenPocs.empty() )
++  if( !mode.writtenPocs.empty() )
+   {
+-    startPoc = std::max( startPoc, *m_fgcWrittenPocs.rbegin() + 1 );
++    startPoc = std::max( startPoc, *mode.writtenPocs.rbegin() + 1 );
+   }
+-  m_fgcByStartPoc.erase( m_fgcByStartPoc.lower_bound( startPoc ), m_fgcByStartPoc.end() );
+-  m_fgcByStartPoc[ startPoc ] = param;
+-  while( m_fgcByStartPoc.size() > m_fgcParamSets )
++  mode.byStartPoc.erase( mode.byStartPoc.lower_bound( startPoc ), mode.byStartPoc.end() );
++  mode.byStartPoc[ startPoc ] = param;
++  while( mode.byStartPoc.size() > m_fgcParamSets )
+   {
+     // the oldest set is dropped; the next one then applies to all earlier pictures, all of them written long ago
+-    m_fgcByStartPoc.erase( m_fgcByStartPoc.begin() );
+-    FilmGrainParam oldest = m_fgcByStartPoc.begin()->second;
+-    m_fgcByStartPoc.erase( m_fgcByStartPoc.begin() );
+-    m_fgcByStartPoc[ std::numeric_limits<int>::min() ] = oldest;
++    mode.byStartPoc.erase( mode.byStartPoc.begin() );
++    FilmGrainParam oldest = mode.byStartPoc.begin()->second;
++    mode.byStartPoc.erase( mode.byStartPoc.begin() );
++    mode.byStartPoc[ std::numeric_limits<int>::min() ] = oldest;
+   }
+ }
+ 
+-const FilmGrainParam& EncGOP::xFilmGrainParametersAt( int poc ) const
++const FilmGrainParam& EncGOP::xFilmGrainParametersAt( const FgaMode& mode, int poc )
+ {
+-  return std::prev( m_fgcByStartPoc.upper_bound( poc ) )->second;   // the first set starts at the lowest int
++  return std::prev( mode.byStartPoc.upper_bound( poc ) )->second;   // the first set starts at the lowest int
+ }
+ 
+ // The film grain SEI of a parameter set; the components the configuration marks absent stay absent.
+-SeiFgc EncGOP::xFilmGrainSei( const FilmGrainParam& param, ChromaFormat chromaFormat )
++SeiFgc EncGOP::xFilmGrainSei( const FgaMode& mode, const FilmGrainParam& param, ChromaFormat chromaFormat )
+ {
+   SeiFgc sei;
+   m_seiEncoder.initSeiFgc( &sei );
++  sei.filmGrainModelId = mode.fga == 3 ? 1 : 0;   // --fga 3: the auto-regressive model
+   sei.log2ScaleFactor = param.log2ScaleFactor;
+   for( int c = 0; c < getNumberValidComponents( chromaFormat ); c++ )
+   {
+@@ -2979,25 +3023,25 @@ SeiFgc EncGOP::xFilmGrainSei( const FilmGrainParam& param, ChromaFormat chromaFo
+ // layer video sequence (the leading pictures of an IDR, of which the first in output order is not known in coding
+ // order). Decoding from a CRA, vvdec skips its RASL pictures but applies their messages to the next decoded picture, so
+ // the first picture after RASL pictures with a message gets one as well.
+-bool EncGOP::xFilmGrainSeiNeeded( const Slice& slice, const SeiFgc& sei, ChromaFormat chromaFormat )
++bool EncGOP::xFilmGrainSeiNeeded( FgaMode& mode, const Slice& slice, const SeiFgc& sei, ChromaFormat chromaFormat )
+ {
+   if( slice.isIDRorBLA() )
+   {
+-    m_fgcWrittenPocs.clear();   // a new coded layer video sequence, where no earlier message persists
++    mode.writtenPocs.clear();   // a new coded layer video sequence, where no earlier message persists
+   }
+   const bool rasl         = slice.nalUnitType == VVENC_NAL_UNIT_CODED_SLICE_RASL;
+   const bool randomAccess = slice.isIRAP() || slice.picHeader->gdrPic;
+-  const bool firstWritten = m_fgcWrittenPocs.lower_bound( slice.poc ) == m_fgcWrittenPocs.begin();
+-  const bool afterRasl    = !rasl && m_fgcRaslSeiPending;
+-  const bool changed      = !sameFilmGrainCharacteristics( xFilmGrainSei( xFilmGrainParametersAt( slice.poc - 1 ), chromaFormat ), sei );
++  const bool firstWritten = mode.writtenPocs.lower_bound( slice.poc ) == mode.writtenPocs.begin();
++  const bool afterRasl    = !rasl && mode.raslSeiPending;
++  const bool changed      = !sameFilmGrainCharacteristics( xFilmGrainSei( mode, xFilmGrainParametersAt( mode, slice.poc - 1 ), chromaFormat ), sei );
+   const bool needed       = !sei.fgcPersistenceFlag || randomAccess || firstWritten || afterRasl || changed;
+ 
+-  m_fgcWrittenPocs.insert( slice.poc );
+-  while( m_fgcWrittenPocs.size() > FGC_SEI_HISTORY )
++  mode.writtenPocs.insert( slice.poc );
++  while( mode.writtenPocs.size() > FGC_SEI_HISTORY )
+   {
+-    m_fgcWrittenPocs.erase( m_fgcWrittenPocs.begin() );
++    mode.writtenPocs.erase( mode.writtenPocs.begin() );
+   }
+-  m_fgcRaslSeiPending = rasl && ( m_fgcRaslSeiPending || needed );
++  mode.raslSeiPending = rasl && ( mode.raslSeiPending || needed );
+   return needed;
+ }
+ 
+@@ -3014,16 +3058,35 @@ void EncGOP::xStoreLostGrainSpectra( Picture& pic ) const
+   for( int c = 0; c < getNumberValidComponents( pic.chromaFormat ); c++ )
+   {
+     const ComponentID compId = ComponentID( c );
+-    m_fgAnalyzer.lostGrainSpectra( pic.getOrigBuf( compId ), pic.getRecoBuf( compId ),
+-                                   m_pcEncCfg->m_internalBitDepth[ toChannelType( compId ) ], pic.lostGrainSpectra[ c ] );
++    m_fgaModes.front()->analyzer.lostGrainSpectra( pic.getOrigBuf( compId ), pic.getRecoBuf( compId ),
++                                                  m_pcEncCfg->m_internalBitDepth[ toChannelType( compId ) ], pic.lostGrainSpectra[ c ] );
++  }
++}
++
++// --fga 4 with FgaStacked codes nothing; it fits --fga 2's and 3's SEIs to the grain an encode made elsewhere lost, whose
++// decoded pictures come with the source pictures: each input plane continues below the picture with the encode's.
++// Computed on input, over the source's size (an encode of a size VVenC pads, not a multiple of 8, would also have its
++// padded rows measured in a real encode where they complete a 16x16 block). The real encode's spectra are those of the
++// same pictures, so with that encode's reconstruction below the source the fit is the real encode's.
++void EncGOP::storeStackedLostGrainSpectra( const vvencYUVBuffer& yuvInBuf, PicShared& picShared ) const
++{
++  for( int c = 0; c < getNumberValidComponents( m_pcEncCfg->m_internChromaFormat ); c++ )
++  {
++    const ComponentID   compId = ComponentID( c );
++    const vvencYUVPlane& plane = yuvInBuf.planes[ c ];
++    const CPelBuf org( plane.ptr, plane.stride, plane.width, plane.height );
++    const CPelBuf rec( plane.ptr + (ptrdiff_t) plane.height * plane.stride, plane.stride, plane.width, plane.height );
++    m_fgaModes.front()->analyzer.lostGrainSpectra( org, rec, m_pcEncCfg->m_internalBitDepth[ toChannelType( compId ) ],
++                                                  picShared.fgaLostGrainSpectra()[ c ] );
+   }
+ }
+ 
+ // The film grain SEIs are fitted to the grain the coding lost: with the improved analysis (--fga 2 and 3), in the final
+-// pass, when the SEI is written with the pictures (not as one SEI for the whole sequence).
++// pass, when the SEI is written with the pictures (not as one SEI for the whole sequence). Not with --fga 4, which codes
++// nothing, so no picture has a reconstruction (with FgaStacked it fits to the encode given, xWriteFilmGrainSegments).
+ bool EncGOP::xFitsLostGrain() const
+ {
+-  return m_pcEncCfg->m_fga >= 2 && m_pcEncCfg->m_fg.m_fgcSEIEnabled && !m_pcEncCfg->m_fg.m_fgcSEIPerPictureSEI
++  return ( m_pcEncCfg->m_fga == 2 || m_pcEncCfg->m_fga == 3 ) && m_pcEncCfg->m_fg.m_fgcSEIEnabled && !m_pcEncCfg->m_fg.m_fgcSEIPerPictureSEI
+          && m_pcRateCtrl->rcIsFinalPass && !m_isPreAnalysis;
+ }
+ 
+@@ -3072,16 +3135,15 @@ static void signalBothCutoffs( SeiFgc::CompModel& cm )
+ // coding keeps part of it (the full synthesis would add it twice) and loses the fine band first (the analyzer's cut-offs
+ // are those of the source's grain). Per component: the summed spectra of each interval over this picture and the previous
+ // LOST_GRAIN_POOL - 1 pictures of its temporal layer (only those at most LOST_GRAIN_POOL_SPAN pictures back), then
+-// xFitLostGrain or xFitLostGrainAr. Random access points start over. Frees
+-// the picture's spectra.
+-void EncGOP::xScaleToLostGrain( Picture& pic, const Slice& slice, SeiFgc& sei )
++// xFitLostGrain or xFitLostGrainAr, on the mode's state. Random access points start over.
++void EncGOP::xScaleToLostGrain( LostGrainState& state, const Picture& pic, const Slice& slice, SeiFgc& sei ) const
+ {
+   constexpr int N = 16 * 16;
+   if( slice.isIRAP() || slice.picHeader->gdrPic )
+   {
+-    m_lostGrainHistory.clear();
+-    m_lostGrainShift.clear();
+-    m_lostGrainFitted.clear();
++    state.history.clear();
++    state.shift.clear();
++    state.fitted.clear();
+   }
+   for( int c = 0; c < getNumberValidComponents( pic.chromaFormat ); c++ )
+   {
+@@ -3122,7 +3184,7 @@ void EncGOP::xScaleToLostGrain( Picture& pic, const Slice& slice, SeiFgc& sei )
+     {
+       const SeiFgc::CompModelIntensityValues& iv = cm.intensityValues[ i ];
+       const LostGrainKey key( c, iv.intensityIntervalLowerBound, iv.intensityIntervalUpperBound, slice.TLayer );
+-      std::deque<LostGrainSums>& history = m_lostGrainHistory[ key ];
++      std::deque<LostGrainSums>& history = state.history[ key ];
+       sums[ i ].poc = pic.poc;
+       history.push_back( sums[ i ] );
+       if( history.size() > LOST_GRAIN_POOL )
+@@ -3149,19 +3211,24 @@ void EncGOP::xScaleToLostGrain( Picture& pic, const Slice& slice, SeiFgc& sei )
+     const int         bitDepth = m_pcEncCfg->m_internalBitDepth[ toChannelType( compId ) ];
+     if( arModel )
+     {
+-      xFitLostGrainAr( c, slice.TLayer, bitDepth, sei.log2ScaleFactor, power, cm );
++      xFitLostGrainAr( state, c, slice.TLayer, bitDepth, sei.log2ScaleFactor, power, cm );
+     }
+     else
+     {
+-      xFitLostGrain( c, slice.TLayer, bitDepth, c != COMP_Y && pic.chromaFormat == CHROMA_420, sei.log2ScaleFactor, power, cm );
++      xFitLostGrain( state, c, slice.TLayer, bitDepth, c != COMP_Y && pic.chromaFormat == CHROMA_420, sei.log2ScaleFactor, power, cm );
+     }
+-    eraseOtherIntervals( m_lostGrainHistory, c, slice.TLayer, cm );
+-    eraseOtherIntervals( m_lostGrainFitted, c, slice.TLayer, cm );
++    eraseOtherIntervals( state.history, c, slice.TLayer, cm );
++    eraseOtherIntervals( state.fitted, c, slice.TLayer, cm );
+   }
+-  for( auto& spectra : pic.lostGrainSpectra )
++}
++
++// Frees a picture's lost-grain spectra once its film grain SEIs are fitted.
++static void freeLostGrainSpectra( std::vector<LostGrainSpectrum> ( &spectra )[ MAX_NUM_COMP ] )
++{
++  for( auto& s : spectra )
+   {
+-    spectra.clear();
+-    spectra.shrink_to_fit();
++    s.clear();
++    s.shrink_to_fit();
+   }
+ }
+ 
+@@ -3181,8 +3248,8 @@ static constexpr int MIN_POOLED_BLOCKS = 32;
+ // cut-offs at equal power; a lower fit is taken at once (a limit on the way down held the grain above the fit for many
+ // pictures, see xFitLostGrainAr). A picture with nothing to fit keeps the shift, an interval without a fit keeps its last
+ // grain power (at first the analyzer's).
+-void EncGOP::xFitLostGrain( int c, unsigned layer, int bitDepth, bool chroma420, int log2ScaleFactor,
+-                            const std::vector<FGAnalyzer::LostGrainPower>& power, SeiFgc::CompModel& cm )
++void EncGOP::xFitLostGrain( LostGrainState& state, int c, unsigned layer, int bitDepth, bool chroma420, int log2ScaleFactor,
++                            const std::vector<FGAnalyzer::LostGrainPower>& power, SeiFgc::CompModel& cm ) const
+ {
+   constexpr int MAX_SHIFT         = 12;
+   // static: the lambdas below read them without a capture (MSVC C3493). The cut-offs' range, which
+@@ -3270,9 +3337,9 @@ void EncGOP::xFitLostGrain( int c, unsigned layer, int bitDepth, bool chroma420,
+     }
+   }
+   const auto layerKey  = std::make_pair( c, layer );
+-  const auto lastShift = m_lostGrainShift.find( layerKey );
++  const auto lastShift = state.shift.find( layerKey );
+   int dh = bestH, dw = bestW;
+-  if( lastShift != m_lostGrainShift.end() )
++  if( lastShift != state.shift.end() )
+   {
+     const int lastH = lastShift->second.first, lastW = lastShift->second.second;
+     dh = bestCost < 0 ? lastH : Clip3( lastH - 1, lastH + 1, bestH );
+@@ -3280,7 +3347,7 @@ void EncGOP::xFitLostGrain( int c, unsigned layer, int bitDepth, bool chroma420,
+   }
+   if( bestCost >= 0 )   // a picture with nothing to fit records no shift: the layer's first fit is then free, not 1 per picture from 0
+   {
+-    m_lostGrainShift[ layerKey ] = std::make_pair( dh, dw );
++    state.shift[ layerKey ] = std::make_pair( dh, dw );
+   }
+   for( int i = 0; i < n; i++ )
+   {
+@@ -3291,8 +3358,8 @@ void EncGOP::xFitLostGrain( int c, unsigned layer, int bitDepth, bool chroma420,
+     const LostGrainKey key( c, iv.intensityIntervalLowerBound, iv.intensityIntervalUpperBound, layer );
+     // the interval's last value moved to the new cut-offs at equal power; before its first fit, the analyzer's grain, which
+     // is not recorded: the first fit is then free instead of starting max(1, s0 / 8) per picture down from the analyzer's
+-    const auto last   = m_lostGrainFitted.find( key );
+-    const bool fitted = last != m_lostGrainFitted.end();
++    const auto last   = state.fitted.find( key );
++    const bool fitted = last != state.fitted.end();
+     const int  held   = fitted ? FGAnalyzer::equalPowerScale( last->second.scale, chroma420, last->second.h, last->second.w, h, w ) : analyzerScale;
+     int  scale = held;
+     const Fit* lostFit = power[ i ].blocks >= MIN_POOLED_BLOCKS ? &fitAt( i, h, w ) : nullptr;
+@@ -3309,7 +3376,7 @@ void EncGOP::xFitLostGrain( int c, unsigned layer, int bitDepth, bool chroma420,
+     iv.compModelValue[ 2 ] = w;
+     if( fits || fitted )
+     {
+-      m_lostGrainFitted[ key ] = { h, w, scale };
++      state.fitted[ key ] = { h, w, scale };
+     }
+   }
+ }
+@@ -3326,8 +3393,8 @@ void EncGOP::xFitLostGrain( int c, unsigned layer, int bitDepth, bool chroma420,
+ // to 105 and 97, and that picture had 1.96 times the source's finest band between neighbours at 1.0). On the way up the
+ // scaling factor rises at most an eighth of its last value per picture of the layer (at least 1, at most s0 / 8), so
+ // that the grain does not pulse; the price is that a value near 0 rises slowly.
+-void EncGOP::xFitLostGrainAr( int c, unsigned layer, int bitDepth, int log2ScaleFactor,
+-                              const std::vector<FGAnalyzer::LostGrainPower>& power, SeiFgc::CompModel& cm )
++void EncGOP::xFitLostGrainAr( LostGrainState& state, int c, unsigned layer, int bitDepth, int log2ScaleFactor,
++                              const std::vector<FGAnalyzer::LostGrainPower>& power, SeiFgc::CompModel& cm ) const
+ {
+   if( cm.numIntensityIntervals == 0 )
+   {
+@@ -3337,30 +3404,30 @@ void EncGOP::xFitLostGrainAr( int c, unsigned layer, int bitDepth, int log2Scale
+   const std::vector<int>& first = cm.intensityValues[ 0 ].compModelValue;
+   std::vector<int> filter( first.begin() + 1, first.end() );
+   filter.insert( filter.begin(), log2ScaleFactor );
+-  if( m_arGrain[ c ].filter != filter )
++  if( state.arGrain[ c ].filter != filter )
+   {
+     const FGAnalyzer::ArGrain newGrain = FGAnalyzer::arGrain( first, log2ScaleFactor, bitDepth, c == COMP_Y );
+     // the scaling factors last written are in units of the old filter's grain: keep their grain level, so that a new
+     // analysis does not make the grain jump
+-    for( auto& fitted : m_lostGrainFitted )
++    for( auto& fitted : state.fitted )
+     {
+-      if( std::get<0>( fitted.first ) == c && !m_arGrain[ c ].filter.empty() && newGrain.stddevPerScale > 0.0 )
++      if( std::get<0>( fitted.first ) == c && !state.arGrain[ c ].filter.empty() && newGrain.stddevPerScale > 0.0 )
+       {
+-        fitted.second.scale = (int) std::lround( fitted.second.scale * m_arGrain[ c ].grain.stddevPerScale / newGrain.stddevPerScale );
++        fitted.second.scale = (int) std::lround( fitted.second.scale * state.arGrain[ c ].grain.stddevPerScale / newGrain.stddevPerScale );
+       }
+     }
+-    m_arGrain[ c ].grain  = newGrain;
+-    m_arGrain[ c ].filter = filter;
++    state.arGrain[ c ].grain  = newGrain;
++    state.arGrain[ c ].filter = filter;
+   }
+-  const FGAnalyzer::ArGrain& grain = m_arGrain[ c ].grain;
++  const FGAnalyzer::ArGrain& grain = state.arGrain[ c ].grain;
+ 
+   for( int i = 0; i < cm.numIntensityIntervals; i++ )
+   {
+     SeiFgc::CompModelIntensityValues& iv = cm.intensityValues[ i ];
+     const int s0 = iv.compModelValue[ 0 ];   // the analyzer's
+     const LostGrainKey key( c, iv.intensityIntervalLowerBound, iv.intensityIntervalUpperBound, layer );
+-    const auto last   = m_lostGrainFitted.find( key );
+-    const bool fitted = last != m_lostGrainFitted.end();
++    const auto last   = state.fitted.find( key );
++    const bool fitted = last != state.fitted.end();
+     int  scale = fitted ? last->second.scale : s0;
+     int  fit;
+     const bool fits = power[ i ].blocks >= MIN_POOLED_BLOCKS && FGAnalyzer::lostGrainFitAr( power[ i ], grain, s0, fit ) >= 0;
+@@ -3373,7 +3440,7 @@ void EncGOP::xFitLostGrainAr( int c, unsigned layer, int bitDepth, int log2Scale
+     iv.compModelValue[ 0 ] = scale;
+     if( fits || fitted )
+     {
+-      m_lostGrainFitted[ key ] = { 0, 0, scale };
++      state.fitted[ key ] = { 0, 0, scale };
+     }
+   }
+ }
+@@ -3428,24 +3495,39 @@ void EncGOP::xWriteLeadingSEIs( Picture& pic, AccessUnitList& accessUnit )
+     // picture on (xAddFilmGrainParameters).
+     while( !m_fgaTasks.empty() && m_fgaTasks.front()->codingNum <= pic.gopEntry->m_codingNum )
+     {
+-      m_fgaTasks.front()->counter.wait();
+-      xAddFilmGrainParameters( *m_fgaTasks.front() );
++      FgaTask& task = *m_fgaTasks.front();
++      task.counter.wait();
++      for( size_t m = 0; m < m_fgaModes.size(); m++ )
++      {
++        const FgaTask::ModeResult& result = task.results[ m ];
++        if( result.analysed )
++        {
++          xAddFilmGrainParameters( *m_fgaModes[ m ], result.param, result.startPoc );
++        }
++      }
+       // the consumed task has run, so the task after it no longer looks at its barrier once that one has run too
+       m_fgaConsumed = std::move( m_fgaTasks.front() );
+       m_fgaTasks.pop_front();
+     }
+ 
+-    SeiFgc sei = xFilmGrainSei( xFilmGrainParametersAt( slice->poc ), pic.chromaFormat );
+     // With the improved analysis (--fga 2 and 3), every picture's message is scaled to the grain its coding lost, so every
+-    // picture carries one.
++    // picture carries one. Not in --fga 4, which codes nothing.
+     const bool scaled = xFitsLostGrain();
+-    if( scaled )
++    for( auto& mode : m_fgaModes )
+     {
+-      xScaleToLostGrain( pic, *slice, sei );
++      SeiFgc sei = xFilmGrainSei( *mode, xFilmGrainParametersAt( *mode, slice->poc ), pic.chromaFormat );
++      if( scaled )
++      {
++        xScaleToLostGrain( mode->lostGrain, pic, *slice, sei );
++      }
++      if( xFilmGrainSeiNeeded( *mode, *slice, sei, pic.chromaFormat ) || scaled )
++      {
++        leadingSeiMessages.push_back( new SeiFgc( sei ) );
++      }
+     }
+-    if( xFilmGrainSeiNeeded( *slice, sei, pic.chromaFormat ) || scaled )
++    if( scaled )
+     {
+-      leadingSeiMessages.push_back( new SeiFgc( sei ) );
++      freeLostGrainSpectra( pic.lostGrainSpectra );
+     }
+   }
+ 
+@@ -3474,6 +3556,67 @@ void EncGOP::xWriteLeadingSEIs( Picture& pic, AccessUnitList& accessUnit )
+   deleteSEIs( leadingSeiMessages );
+ }
+ 
++// --fga 4: the parameter sets of the analyses finished up to this picture, each mode's behind a marker with the mode and
++// the POC it applies from (FGA_SEGMENT_MARKER_UUID), as prefix SEI NAL units; no other NAL units. With FgaStacked, then
++// --fga 2's and 3's sets of this picture fitted to the grain the given encode lost, as a real encode fits its own
++// (xScaleToLostGrain), each behind a marker with the mode plus FGA_FITTED_TO_ENCODE and the picture's POC.
++void EncGOP::xWriteFilmGrainSegments( Picture& pic, AccessUnitList& accessUnit )
++{
++  SEIMessages messages;
++  const auto addMarker = [ &messages ]( int modeByte, int poc )
++  {
++    const uint32_t pocBits = static_cast<uint32_t>( poc );
++    SEIuserDataUnregistered* marker = new SEIuserDataUnregistered;
++    std::copy( FGA_SEGMENT_MARKER_UUID, FGA_SEGMENT_MARKER_UUID + ISO_IEC_11578_LEN, marker->uuid_iso_iec_11578 );
++    marker->userDataLength = 5;
++    marker->userData       = new uint8_t[ 5 ]{ static_cast<uint8_t>( modeByte ), static_cast<uint8_t>( pocBits >> 24 ),
++                                               static_cast<uint8_t>( pocBits >> 16 ), static_cast<uint8_t>( pocBits >> 8 ),
++                                               static_cast<uint8_t>( pocBits ) };
++    messages.push_back( marker );
++  };
++  while( !m_fgaTasks.empty() && m_fgaTasks.front()->codingNum <= pic.gopEntry->m_codingNum )
++  {
++    FgaTask& task = *m_fgaTasks.front();
++    task.counter.wait();
++    for( size_t m = 0; m < m_fgaModes.size(); m++ )
++    {
++      FgaMode& mode                     = *m_fgaModes[ m ];
++      const FgaTask::ModeResult& result = task.results[ m ];
++      if( !result.analysed )
++      {
++        continue;
++      }
++      xAddFilmGrainParameters( mode, result.param, result.startPoc );
++      addMarker( mode.fga, result.startPoc );
++      messages.push_back( new SeiFgc( xFilmGrainSei( mode, xFilmGrainParametersAt( mode, result.startPoc ), pic.chromaFormat ) ) );
++    }
++    // the consumed task has run, so the task after it no longer looks at its barrier once that one has run too
++    m_fgaConsumed = std::move( m_fgaTasks.front() );
++    m_fgaTasks.pop_front();
++  }
++  if( m_pcEncCfg->m_fgaStacked )
++  {
++    for( int c = 0; c < MAX_NUM_COMP; c++ )
++    {
++      pic.lostGrainSpectra[ c ] = std::move( pic.m_picShared->fgaLostGrainSpectra()[ c ] );
++    }
++    for( auto& mode : m_fgaModes )
++    {
++      if( mode->fga == 2 || mode->fga == 3 )
++      {
++        SeiFgc sei = xFilmGrainSei( *mode, xFilmGrainParametersAt( *mode, pic.poc ), pic.chromaFormat );
++        xScaleToLostGrain( mode->lostGrain, pic, *pic.slices[ 0 ], sei );
++        addMarker( mode->fga | FGA_FITTED_TO_ENCODE, pic.poc );
++        messages.push_back( new SeiFgc( sei ) );
++      }
++    }
++    freeLostGrainSpectra( pic.lostGrainSpectra );
++  }
++  AccessUnitList::iterator pos = accessUnit.end();
++  xWriteSEISeparately( VVENC_NAL_UNIT_PREFIX_SEI, messages, accessUnit, pos, 0, pic.slices[ 0 ]->sps );
++  deleteSEIs( messages );
++}
++
+ void EncGOP::xWriteTrailingSEIs( const Picture& pic, AccessUnitList& accessUnit, std::string& digestStr )
+ {
+   const Slice* slice = pic.slices[ 0 ];
+diff --git a/source/Lib/EncoderLib/EncGOP.h b/source/Lib/EncoderLib/EncGOP.h
+index cb957bcb..d1ee806d 100644
+--- a/source/Lib/EncoderLib/EncGOP.h
++++ b/source/Lib/EncoderLib/EncGOP.h
+@@ -207,39 +207,13 @@ private:
+   std::vector<int>          m_globalCtuQpVector;
+   bool                      m_forceSCC;
+ 
+-  FGAnalyzer              m_fgAnalyzer;                 ///< film grain analysis (--fga)
+-
+-  // An analysis, run as a thread pool task. The tasks run one after the other in POC order (each waits for the
+-  // previous one), because every analysis adds to the statistics of the previous ones.
+-  struct FgaTask
+-  {
+-    EncGOP*        gop       = nullptr;
+-    Picture*       pic       = nullptr;
+-    int            codingNum = 0;   ///< the picture with whose access unit the result is taken
+-    int            startPoc  = std::numeric_limits<int>::min();   ///< the first picture in output order its result is for; written pictures keep theirs
+-    bool           sceneCut  = false;   ///< a scene cut lies between the previously analysed picture and this one
+-    FilmGrainParam result;
+-    WaitCounter    counter;
+-  };
+-  std::deque<std::unique_ptr<FgaTask>> m_fgaTasks;      ///< analyses whose access unit is not written yet
+-  std::unique_ptr<FgaTask>             m_fgaConsumed;   ///< the last consumed task, kept until the next one has run
+-  FgaTask*                             m_fgaLast = nullptr;   ///< the last submitted task
+-  int                                  m_fgaPrevAnalysedPoc = std::numeric_limits<int>::min();   ///< POC of the last analysed picture
+-  // The film grain parameter sets by the POC from which they apply in output order: an analysis applies from the
+-  // picture after the previously analysed one, or from a scene cut between them, but never before the picture after
+-  // the last written one. The latest few are kept.
+-  size_t                    m_fgcParamSets  = 8;   ///< the most kept: two GOPs of analyses and two more, at least 8
+-  std::map<int, FilmGrainParam> m_fgcByStartPoc;
+-  bool                      m_fgcCompSignalled[ MAX_NUM_COMP ] = { false, false, false };   ///< components present in a parameter set so far
+-  // The POCs of the latest access units written in the current coded layer video sequence (more than two GOPs), and
+-  // whether a RASL picture carried a film grain SEI since the last other picture; to decide where the SEI is needed.
++  size_t                    m_fgcParamSets  = 8;   ///< the most sets kept per mode: two GOPs of analyses and two more, at least 8
+   static constexpr size_t   FGC_SEI_HISTORY = 160;
+-  std::set<int>             m_fgcWrittenPocs;
+-  bool                      m_fgcRaslSeiPending = false;
+-  // The film grain SEI fitted to the grain the coding lost (xScaleToLostGrain): per component, intensity interval and
+-  // temporal layer, the interval's summed spectra of the latest LOST_GRAIN_POOL pictures of that layer and the last
+-  // cut-offs and scaling factor written; per component and temporal layer, the last cut-off shift. Cleared at every
+-  // random access point (--fga 2 and 3).
++
++  // The film grain SEI fitted to the grain the coding lost (xScaleToLostGrain), one state per mode: per component,
++  // intensity interval and temporal layer, the interval's summed spectra of the latest LOST_GRAIN_POOL pictures of that
++  // layer and the last cut-offs and scaling factor written; per component and temporal layer, the last cut-off shift.
++  // Cleared at every random access point (--fga 2 and 3, and --fga 4 with FgaStacked).
+   struct LostGrainSums
+   {
+     double orig[ 256 ] = {};
+@@ -258,9 +232,6 @@ private:
+   };
+   using LostGrainKey = std::tuple<int, int, int, unsigned>;   ///< component, interval lower and upper bound, temporal layer
+   static constexpr size_t LOST_GRAIN_POOL = 4;
+-  std::map<LostGrainKey, std::deque<LostGrainSums>>        m_lostGrainHistory;
+-  std::map<LostGrainKey, LostGrainFitted>                  m_lostGrainFitted;
+-  std::map<std::pair<int, unsigned>, std::pair<int, int>> m_lostGrainShift;   ///< (component, layer) -> (dh, dw)
+   // With the auto-regressive model (--fga 3): per component, the grain of the filter last signalled (FGAnalyzer::arGrain
+   // is computed once per filter, the fit runs for every picture).
+   struct ArGrainOfFilter
+@@ -268,7 +239,67 @@ private:
+     std::vector<int>    filter;   ///< log2 scale factor, then the model values after the scaling factor
+     FGAnalyzer::ArGrain grain;
+   };
+-  ArGrainOfFilter           m_arGrain[ MAX_NUM_COMP ];
++  struct LostGrainState
++  {
++    std::map<LostGrainKey, std::deque<LostGrainSums>>        history;
++    std::map<LostGrainKey, LostGrainFitted>                  fitted;
++    std::map<std::pair<int, unsigned>, std::pair<int, int>> shift;   ///< (component, layer) -> (dh, dw)
++    ArGrainOfFilter                                          arGrain[ MAX_NUM_COMP ];
++  };
++
++  // A film grain analysis mode (--fga 1, 2 or 3): its analyzer and the state of its film grain SEI signalling. --fga 1
++  // to 3 run one mode. --fga 4 runs all three on the same pictures without coding them, for a tool that adds the grain
++  // to an encode made elsewhere (FGA_SEGMENT_MARKER_UUID).
++  struct FgaMode
++  {
++    int        fga = 0;
++    FGAnalyzer analyzer;
++    // The film grain parameter sets by the POC from which they apply in output order: an analysis applies from the
++    // picture after the previously analysed one, or from a scene cut between them, but never before the picture after
++    // the last written one. The latest m_fgcParamSets are kept.
++    std::map<int, FilmGrainParam> byStartPoc;
++    int           prevAnalysedPoc = std::numeric_limits<int>::min();   ///< POC of the last picture this mode analysed
++    bool          compSignalled[ MAX_NUM_COMP ] = { false, false, false };   ///< components present in a parameter set so far
++    // The POCs of the latest access units written in the current coded layer video sequence (FGC_SEI_HISTORY, more
++    // than two GOPs), and whether a RASL picture carried a film grain SEI since the last other picture; to decide
++    // where the SEI is needed.
++    std::set<int> writtenPocs;
++    bool          raslSeiPending = false;
++    LostGrainState lostGrain;   ///< the fit of its SEIs to the grain the coding lost (xScaleToLostGrain)
++  };
++  std::vector<std::unique_ptr<FgaMode>> m_fgaModes;   ///< empty without film grain analysis
++  // --fga 4, the analysis without coding: after each analysis, each mode's parameter set as an SEI message behind a
++  // marker with UUID 393cc818-0a4b-4cef-8e2d-f1605b9577c0 and five data bytes: the mode, then the POC from which the
++  // set applies in output order (big-endian, two's complement; the lowest int for the first set, which applies from
++  // the start). A set applies up to the next one's POC.
++  static constexpr uint8_t FGA_SEGMENT_MARKER_UUID[ ISO_IEC_11578_LEN ] = { 0x39, 0x3c, 0xc8, 0x18, 0x0a, 0x4b, 0x4c, 0xef,
++                                                                            0x8e, 0x2d, 0xf1, 0x60, 0x5b, 0x95, 0x77, 0xc0 };
++  // FgaStacked: added to the mode byte of a set that is one picture's own, fitted to the grain the given encode lost
++  // (the POC is that picture's)
++  static constexpr int FGA_FITTED_TO_ENCODE = 0x80;
++
++  // An analysis, run as a thread pool task. The tasks run one after the other in POC order (each waits for the
++  // previous one), because every analysis adds to the statistics of the previous ones.
++  struct FgaTask
++  {
++    EncGOP*        gop       = nullptr;
++    Picture*       pic       = nullptr;
++    int            codingNum = 0;   ///< the picture with whose access unit the result is taken
++    // One per mode of m_fgaModes. With --fga 4 a mode may skip the picture: --fga 1 has no shot restarts.
++    struct ModeResult
++    {
++      bool           analysed = false;
++      int            startPoc = std::numeric_limits<int>::min();   ///< the first picture in output order the result applies to
++      bool           sceneCut = false;   ///< a scene cut or shot restart lies between the mode's previous analysis and this one
++      FilmGrainParam param;
++    };
++    std::vector<ModeResult> results;
++    WaitCounter    counter;
++  };
++  std::deque<std::unique_ptr<FgaTask>> m_fgaTasks;      ///< analyses whose access unit is not written yet
++  std::unique_ptr<FgaTask>             m_fgaConsumed;   ///< the last consumed task, kept until the next one has run
++  FgaTask*                             m_fgaLast = nullptr;   ///< the last submitted task
++  int                                  m_fgaPrevAnalysedPoc = std::numeric_limits<int>::min();   ///< POC of the last analysed picture
+ 
+ public:
+   EncGOP( MsgLog& msglog );
+@@ -279,6 +310,9 @@ public:
+   void init               ( const VVEncCfg& encCfg, const GOPCfg* gopCfg, RateCtrl& rateCtrl, NoMallocThreadPool* threadPool, bool isPreAnalysis );
+   void printOutSummary    ( const bool printMSEBasedSNR, const bool printSequenceMSE, const bool printHexPsnr );
+   void getParameterSets   ( AccessUnitList& accessUnit );
++  // --fga 4 with FgaStacked: the lost-grain spectra (FGAnalyzer::lostGrainSpectra) of an input picture, whose planes
++  // continue below the picture with the decoded encode the grain is fitted to, kept in its shared picture data
++  void storeStackedLostGrainSpectra( const vvencYUVBuffer& yuvInBuf, PicShared& picShared ) const;
+ 
+ protected:
+   virtual void initPicture    ( Picture* pic );
+@@ -331,18 +365,19 @@ private:
+   void xWritePicture                  ( Picture& pic, AccessUnitList& au, bool isEncodeLtRef );
+   int  xWriteParameterSets            ( Picture& pic, AccessUnitList& accessUnit, HLSWriter& hlsWriter );
+   int  xWritePictureSlices            ( Picture& pic, AccessUnitList& accessUnit, HLSWriter& hlsWriter );
+-  void xAddFilmGrainParameters       ( const FgaTask& task );
+-  const FilmGrainParam& xFilmGrainParametersAt( int poc ) const;
+-  SeiFgc xFilmGrainSei                ( const FilmGrainParam& param, ChromaFormat chromaFormat );
+-  bool xFilmGrainSeiNeeded           ( const Slice& slice, const SeiFgc& sei, ChromaFormat chromaFormat );
++  void xAddFilmGrainParameters       ( FgaMode& mode, const FilmGrainParam& result, int startPoc );
++  static const FilmGrainParam& xFilmGrainParametersAt( const FgaMode& mode, int poc );
++  SeiFgc xFilmGrainSei                ( const FgaMode& mode, const FilmGrainParam& param, ChromaFormat chromaFormat );
++  bool xFilmGrainSeiNeeded           ( FgaMode& mode, const Slice& slice, const SeiFgc& sei, ChromaFormat chromaFormat );
+   bool xFitsLostGrain                ( ) const;
+   void xStoreLostGrainSpectra        ( Picture& pic ) const;
+-  void xScaleToLostGrain             ( Picture& pic, const Slice& slice, SeiFgc& sei );
+-  void xFitLostGrainAr               ( int c, unsigned layer, int bitDepth, int log2ScaleFactor,
+-                                       const std::vector<FGAnalyzer::LostGrainPower>& power, SeiFgc::CompModel& cm );
+-  void xFitLostGrain                 ( int c, unsigned layer, int bitDepth, bool chroma420, int log2ScaleFactor,
+-                                       const std::vector<FGAnalyzer::LostGrainPower>& power, SeiFgc::CompModel& cm );
++  void xScaleToLostGrain             ( LostGrainState& state, const Picture& pic, const Slice& slice, SeiFgc& sei ) const;
++  void xFitLostGrainAr               ( LostGrainState& state, int c, unsigned layer, int bitDepth, int log2ScaleFactor,
++                                       const std::vector<FGAnalyzer::LostGrainPower>& power, SeiFgc::CompModel& cm ) const;
++  void xFitLostGrain                 ( LostGrainState& state, int c, unsigned layer, int bitDepth, bool chroma420, int log2ScaleFactor,
++                                       const std::vector<FGAnalyzer::LostGrainPower>& power, SeiFgc::CompModel& cm ) const;
+   void xWriteLeadingSEIs              ( Picture& pic, AccessUnitList& accessUnit );
++  void xWriteFilmGrainSegments        ( Picture& pic, AccessUnitList& accessUnit );
+   void xWriteTrailingSEIs             ( const Picture& pic, AccessUnitList& accessUnit, std::string& digestStr );
+   int  xWriteVPS                      ( AccessUnitList &accessUnit, const VPS *vps, HLSWriter& hlsWriter );
+   int  xWriteDCI                      ( AccessUnitList &accessUnit, const DCI *dci, HLSWriter& hlsWriter );
+diff --git a/source/Lib/EncoderLib/EncLib.cpp b/source/Lib/EncoderLib/EncLib.cpp
+index 27ca4faa..fbb03865 100644
+--- a/source/Lib/EncoderLib/EncLib.cpp
++++ b/source/Lib/EncoderLib/EncLib.cpp
+@@ -536,6 +536,10 @@ void EncLib::encodePicture( bool flush, const vvencYUVBuffer* yuvInBuf, AccessUn
+       if( picShared )
+       {
+         picShared->reuse( m_picsRcvd, yuvInBuf );
++        if( m_encCfg.m_fgaStacked )
++        {
++          m_gopEncoder->storeStackedLostGrainSpectra( *yuvInBuf, *picShared );
++        }
+         m_encStages[ 0 ]->addPicSorted( picShared, flush );
+         m_picsRcvd  += 1;
+         inputPending = false;
+diff --git a/source/Lib/EncoderLib/EncStage.h b/source/Lib/EncoderLib/EncStage.h
+index 5c7d7210..cc19a50c 100644
+--- a/source/Lib/EncoderLib/EncStage.h
++++ b/source/Lib/EncoderLib/EncStage.h
+@@ -90,6 +90,9 @@ private:
+   bool             m_sceneCutStart = false;        // the picture starts a new scene (adaptive intra refresh mode 1)
+   int              m_fgaLastSceneCutPoc = std::numeric_limits<int>::min();   // the latest scene cut before it
+   bool             m_fgaShotRestart = false;       // the picture after a shot start: its analysis restarts the shot's statistics
++  // --fga 4 with FgaStacked: the spectra of the source and of the decoded encode given with it (EncGOP::
++  // storeStackedLostGrainSpectra), until its film grain SEIs are fitted
++  std::vector<LostGrainSpectrum> m_fgaLostGrainSpectra[ MAX_NUM_COMP ];
+   uint64_t         m_cts;
+   int              m_maxFrames;
+   int              m_poc;
+@@ -150,6 +153,7 @@ public:
+   bool&        sceneCutStart()         { return m_sceneCutStart; }
+   int&         fgaLastSceneCutPoc()    { return m_fgaLastSceneCutPoc; }
+   bool&        fgaShotRestart()        { return m_fgaShotRestart; }
++  std::vector<LostGrainSpectrum>* fgaLostGrainSpectra() { return m_fgaLostGrainSpectra; }
+   Size         getLumaSize()     const { return m_lumaSize; }
+ 
+   // withSource false: the source buffer comes later, from createSource() or takeSourceFrom()
+diff --git a/source/Lib/apputils/VVEncAppCfg.h b/source/Lib/apputils/VVEncAppCfg.h
+index 6ce6944a..37e1ed41 100644
+--- a/source/Lib/apputils/VVEncAppCfg.h
++++ b/source/Lib/apputils/VVEncAppCfg.h
+@@ -1272,7 +1272,8 @@ int parse( int argc, char* argv[], vvenc_config* c, std::ostream& rcOstr )
+     opts.setSubSection("Film grain analysis");
+     opts.addOptions()
+     ("fgaintervallog2",               toFgaIntervalLog2,         "Experimental: Film grain analysis interval: n >= 0 also analyses every (1 << n)-th picture of a GOP, 1 << n must divide the GOP size (-1: automatic, the GOP's first picture only). Each added picture costs a filtered copy and an analysis, plus an MCTF motion search where MCTF does not filter it, and keeps its buffers until its GOP's coding starts")
+-    ("fga",                           toFga,                     "Experimental: Film grain analysis generating the FGC SEI message (0: off, 1: the analysis of VTM, 2: (1) + grain measured from the temporal residual, calibrated scaling factors, 3: (2) + auto-regressive grain model)")
++    ("fga",                           toFga,                     "Experimental: Film grain analysis generating the FGC SEI message (0: off, 1: the analysis of VTM, 2: (1) + grain measured from the temporal residual, calibrated scaling factors, 3: (2) + auto-regressive grain model, 4: the three modes' analyses without coding: the output holds only, after each analysis, each mode's FGC SEI message behind a user data unregistered SEI with UUID 393cc818-0a4b-4cef-8e2d-f1605b9577c0, the mode and the first picture it applies to, for a tool that adds the grain to another encode)")
++    ("fgastacked",                    c->m_fgaStacked,           "Experimental: fga 4 only: every input picture is twice the height of the size given, the source on top of a decoded encode of it; fga 2's and 3's sets are then also fitted, picture by picture, to the grain that encode lost (as a real encode fits its own), each behind a marker whose mode is 128 + the mode and whose picture is its own")
+     ("fgastrength",                   toFgaStrength,             "Experimental: Film grain strength as a factor of the analysed strength [0...4.0), 1.0 keeps it, 0 disables the grain")
+     ;
+   }
+diff --git a/source/Lib/vvenc/vvencCfg.cpp b/source/Lib/vvenc/vvencCfg.cpp
+index 50d8272b..7a4d83cf 100644
+--- a/source/Lib/vvenc/vvencCfg.cpp
++++ b/source/Lib/vvenc/vvencCfg.cpp
+@@ -707,6 +707,7 @@ VVENC_DECL void vvenc_config_default(vvenc_config *c )
+   c->m_GOPQPA                                  = -1;
+ 
+   c->m_fga                                     = 0;
++  c->m_fgaStacked                              = false;
+   c->m_fgaIntervalLog2                         = -1;
+   c->m_fgaStrengthVal                          = VVENC_SET_FGA_STRENGTH(1.0);
+ 
+@@ -1878,7 +1879,7 @@ VVENC_DECL bool vvenc_init_config_parameter( vvenc_config *c )
+     }
+   }
+ 
+-  vvenc_confirmParameter( c, c->m_fga < 0 || c->m_fga > 3, "Film grain analysis (fga) must be 0, 1, 2 or 3!");
++  vvenc_confirmParameter( c, c->m_fga < 0 || c->m_fga > 4, "Film grain analysis (fga) must be 0, 1, 2, 3 or 4!");
+   vvenc_confirmParameter( c, c->m_fgaIntervalLog2 < -1 || c->m_fgaIntervalLog2 > 6, "Film grain analysis interval (FgaIntervalLog2) must be -1 (automatic) or 0 to 6!");
+   if (c->m_fga)
+   {
+@@ -1894,6 +1895,14 @@ VVENC_DECL bool vvenc_init_config_parameter( vvenc_config *c )
+       vvenc_confirmParameter( c, c->m_LookAhead && interval != c->m_GOPSize, "Film grain analysis interval (FgaIntervalLog2) must be -1 (automatic) or the GOP size with the look-ahead!");
+     }
+   }
++  vvenc_confirmParameter( c, c->m_fgaStacked && c->m_fga != 4, "FgaStacked needs film grain analysis without coding (fga 4)!" );
++  if( c->m_fga == 4 )
++  {
++    // the analysis without coding: nothing may wait for coded pictures (ALF's temporal APS, rate control)
++    vvenc_confirmParameter( c, c->m_RCTargetBitrate > 0, "Film grain analysis without coding (fga 4) needs a fixed QP, not a bitrate!" );
++    c->m_alf   = false;
++    c->m_ccalf = false;
++  }
+ 
+   vvenc_confirmParameter( c, !autoGop && c->m_numRefPics    != 0,                         "NumRefPics cannot be used if explicit GOP configuration is used!" );
+   vvenc_confirmParameter( c, !autoGop && c->m_numRefPicsSCC != 0,                         "NumRefPicsSCC cannot be used if explicit GOP configuration is used!" );
+-- 
+2.55.0.windows.5
+

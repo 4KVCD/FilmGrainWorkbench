@@ -17,6 +17,8 @@
 #include <optional>
 #include <set>
 #include <span>
+#include <string>
+#include <string_view>
 #include <vector>
 
 #include "fgw/mux.h"
@@ -59,22 +61,34 @@ struct FgaAnalysis {
     FgaSegments segments;
 };
 
+// The vvencapp options of the window's analysis: `coding`'s QP, preset and
+// strength (the QP sets how much the analysis's filter smooths, as in an
+// encode at that QP) and --hdr from the source's colour tags.
+std::vector<std::string> vvenc_coding_args(const VvcCoding& coding, const VideoInfo& source);
+
+// Whether the command-line word `arg` ("-f", "--frames=20", "--FrameRate")
+// is a vvencapp option analyse_film_grain sets itself: the input and output,
+// picture size and format, frame rate and count, the analysis mode.
+bool is_analysis_owned_vvenc_option(std::string_view arg);
+
 // The grain of the source frames the encode's frames show: the source at
 // `offset` frames from the encode, cropped and scaled to the encode's
 // picture as the AV1 analysis reads it, analysed by vvencapp --fga 4 with
-// `coding`'s QP, preset and strength (the QP sets how much the analysis's
-// filter smooths, as in an encode at that QP) at the encode's bit depth and
-// frame rate (vvenc_frame_rate), as VVenC analyses what it encodes. The
-// encode's decoded frames go with the source's (--fgastacked), so modes 2
-// and 3 are also fitted, frame by frame, to the grain the encode lost, as
-// VVenC fits its own encodes (pooled over its own GOP structure, VVenC's
-// default).
+// the options `coding_args` (vvenc_coding_args, or the options the encode was
+// made with: its GOP, refresh period and QP decide what the analysis pools
+// and fits; none of them owned, is_analysis_owned_vvenc_option) at the
+// encode's bit depth and frame rate (vvenc_frame_rate), as VVenC analyses
+// what it encodes. The encode's decoded frames go with the source's
+// (--fgastacked), so modes 2 and 3 are also fitted, frame by frame, to the
+// grain the encode lost, as VVenC fits its own encodes (pooled over the GOP
+// structure the options give). `background`: ffmpeg and vvencapp run at
+// below-normal priority.
 // Throws std::invalid_argument for an encode VVenC cannot match (not 8- or
 // 10-bit 4:2:0, a frame rate it does not take), ToolError, Cancelled.
 FgaAnalysis analyse_film_grain(const Tools& tools, const VvcTools& vvc_tools, const VideoInfo& source,
                                const VideoInfo& encoded, std::int64_t offset, const std::optional<Crop>& crop,
-                               const VvcCoding& coding, const std::filesystem::path& work_folder,
-                               const Progress& progress, CancelToken* cancel);
+                               const std::vector<std::string>& coding_args, const std::filesystem::path& work_folder,
+                               const Progress& progress, CancelToken* cancel, bool background = true);
 
 // Where an FGC SEI goes, as VVenC decides it (EncGOP::xFilmGrainSeiNeeded),
 // for pictures met in decoding order with their frame numbers (output order).

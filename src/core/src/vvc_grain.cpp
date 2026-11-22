@@ -204,6 +204,10 @@ struct Picture {
 
 }  // namespace
 
+std::optional<GrainSet> parse_fgc_payload(std::span<const std::uint8_t> payload) {
+    return parse_fgc(payload).set;
+}
+
 std::vector<std::span<const std::uint8_t>> annexb_nals(std::span<const std::uint8_t> data) {
     std::vector<std::size_t> starts;
     for (std::size_t i = 0; i + 2 < data.size();) {
