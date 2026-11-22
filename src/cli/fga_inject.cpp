@@ -8,6 +8,7 @@
 // each source picture above the encode's decoded picture and fits --fga 2's
 // and 3's sets to the grain the encode lost, in the encoder's own picture
 // order, layers and resets, which the encode's vvencapp options decide.
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -55,6 +56,8 @@ replace its film grain (FGC SEI) messages, without encoding.
 The source is decoded into a pipe at the encode's bit depth (4:2:0), converted
 as an `ffmpeg -pix_fmt` pipe converts it (scaled with spline only when its size
 differs from the encode's); ffmpeg, ffprobe and mkvmerge are found on the PATH.
+Before the analysis the pairing of source and encode frames is checked at
+eight places (a few seconds); a pairing that is off stops the run.
 Everything runs at normal priority.
 )";
 
@@ -202,6 +205,41 @@ double seconds_since(std::chrono::steady_clock::time_point start) {
     return std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
 }
 
+// Stops unless the encode's frame k shows source frame k + offset (preflight_alignment). The analysis fits the grain
+// to the source minus the encode, picture by picture, and takes the scene cuts and the picture structure from the
+// source: one frame off, it fits the grain to the difference of two pictures and places every cut a picture early
+// or late. An encode whose source came through `ffmpeg -ss T ... -f yuv4mpegpipe` (or rawvideo) with T between two
+// frames is such a case: the constant-frame-rate output writes the first frame twice, so every frame after the
+// encode's first shows the source frame before the one --source-start T pairs it with (cut with -fps_mode
+// passthrough instead).
+void check_pairing(const Tools& tools, const VideoInfo& source, const VideoInfo& encoded, std::int64_t offset) {
+    const std::int64_t first = frame_range(encoded, source, offset).first;
+    const auto wrong_offset = [offset](const std::string& why) {
+        return std::runtime_error(why + "\nSource frame " + std::to_string(offset) +
+                                  " is not what the encode's frames show: give the right --source-frame (and see "
+                                  "that the encode does not start with a repeated frame).");
+    };
+    std::vector<std::string> verdicts;
+    try {
+        verdicts = preflight_alignment(tools, source, encoded, offset, std::nullopt, nullptr,
+                                       [](double, const std::string&) {}, first);
+    } catch (const ToolError&) {
+        throw;
+    } catch (const std::runtime_error& error) {
+        throw wrong_offset(error.what());
+    }
+    std::string list;
+    for (const std::string& verdict : verdicts) {
+        list += " " + verdict;
+    }
+    std::cerr << "source and encode frames at " << verdicts.size() << " places:" << list << "\n";
+    // The full scan tolerates a minority of shifted places; here one is enough: nothing but a wrong pairing lets
+    // a run of seven frames match its neighbours better.
+    if (std::count(verdicts.begin(), verdicts.end(), "shifted") > 0) {
+        throw wrong_offset("Source and encode frames match neighbouring frames better at some of the places checked.");
+    }
+}
+
 int run(const Options& options) {
     const Tools tools = detect_tools();
     if (const std::vector<std::string> missing = tools.missing(); !missing.empty()) {
@@ -221,6 +259,7 @@ int run(const Options& options) {
     std::cerr << "ffmpeg " << tools.ffmpeg << "\nencode " << utf8(encoded.path) << ": " << encoded.width << "x"
               << encoded.height << " " << encoded.pix_fmt << " " << encoded.fps.to_string()
               << " fps\nsource frame " << offset << " is the encode's frame 0\n";
+    check_pairing(tools, source, encoded, offset);
 
     const TempFolder work("fga-inject-");  // the analysis's stream, deleted at the end
     const VvcTools vvc_tools{options.vvencapp, {}};

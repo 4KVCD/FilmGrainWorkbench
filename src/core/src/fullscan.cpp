@@ -236,6 +236,8 @@ Alignment check_place(const Tools& tools, const VideoInfo& source, const VideoIn
     return alignment;
 }
 
+}  // namespace
+
 // Checks frame-accurate pairing at several places before hours of work.
 // Frames are paired by their own timestamps, like the every-frame pipeline,
 // and the places stay clear of the ends, where cut files have frames that do
@@ -288,6 +290,8 @@ std::vector<std::string> preflight_alignment(const Tools& tools, const VideoInfo
     }
     return verdicts;
 }
+
+namespace {
 
 std::string chroma_name(const Geometry& geometry) {
     return geometry.subsampling_y ? "420" : geometry.subsampling_x ? "422" : "444";

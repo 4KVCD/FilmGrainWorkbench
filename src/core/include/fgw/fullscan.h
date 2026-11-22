@@ -43,6 +43,16 @@ double estimate_seconds(const VideoInfo& encoded, int threads, const VideoInfo* 
 std::pair<std::int64_t, std::int64_t> frame_range(const VideoInfo& encoded, const VideoInfo& source,
                                                   std::int64_t offset);
 
+// Checks, at eight places between encoded frame `first` and the last one,
+// that encoded frame k shows source frame k + offset: seven frames of each,
+// compared with each other and with their neighbours. Returns each place's
+// verdict (to_string(Alignment)). Throws std::runtime_error when most places
+// match a neighbouring frame better or match no frame at all, ToolError, or
+// Cancelled. `progress` is called with fraction -1 after each place.
+std::vector<std::string> preflight_alignment(const Tools& tools, const VideoInfo& source, const VideoInfo& encoded,
+                                             std::int64_t offset, const std::optional<Crop>& crop,
+                                             CancelToken* cancel, const Progress& progress, std::int64_t first);
+
 // The name of a pair's analysis folder: the same key the Python app used, so
 // its analyses (finished or stopped) are found again.
 std::string cache_key(const VideoInfo& source, const VideoInfo& encoded, std::int64_t offset,
