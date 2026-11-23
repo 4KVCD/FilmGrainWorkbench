@@ -47,6 +47,9 @@ QString qstring(const std::string& text) { return QString::fromStdString(text); 
 
 QString first_line(const QString& text) { return text.section('\n', 0, 0); }
 
+// How often an analysis interval of 1 << `log2` frames analyses: "every frame", "every 4 frames".
+QString every_frames(int log2) { return log2 == 0 ? QString("every frame") : QString("every %1 frames").arg(1 << log2); }
+
 }  // namespace
 
 VvcTab::VvcTab(QSettings* settings, const std::filesystem::path& work_parent, QWidget* parent)
@@ -154,6 +157,17 @@ QGroupBox* VvcTab::vvenc_group() {
     strength_spin_->setSuffix(" %");
     strength_spin_->setToolTip("--fgastrength: grain strength in percent of what the analysis measured. VVenC rounds "
                                "it to steps of 1/64 (1.5625 %) and keeps at most 398.4 %.");
+    interval_combo_ = new QComboBox;
+    interval_combo_->addItem("Once per GOP (VVenC's default)", -1);
+    for (int log2 = 4; log2 >= 0; --log2) {  // 32 frames, the GOP, is the default; 1 << log2 must divide the GOP
+        QString label = every_frames(log2);
+        label[0] = label[0].toUpper();
+        interval_combo_->addItem(label, log2);
+    }
+    interval_combo_->setToolTip("--fgaintervallog2: how often VVenC analyses the grain. By default it analyses the "
+                                "first frame of each GOP (32 frames) and of each scene cut; more often follows grain "
+                                "that changes within a GOP, with a new parameter set at each analysis, and costs an "
+                                "analysis and a filtered copy per frame analysed.");
     qp_spin_ = new QDoubleSpinBox;
     qp_spin_->setRange(0, 63);
     qp_spin_->setValue(28);
@@ -167,15 +181,18 @@ QGroupBox* VvcTab::vvenc_group() {
     frames_spin_ = new QSpinBox;
     frames_spin_->setRange(9, 129);
     frames_spin_->setValue(33);
-    frames_spin_->setToolTip("Frames Encode this scene encodes, centred on the frame shown. VVenC analyses the grain "
-                             "once per GOP (32 frames) and at every scene cut, so 33 covers one GOP and the next.");
+    frames_spin_->setToolTip("Frames Encode this scene encodes, centred on the frame shown. By default VVenC analyses "
+                             "the grain once per GOP (32 frames) and at every scene cut, so 33 covers one GOP and the "
+                             "next.");
     form->addRow("Film grain analysis", fga_combo_);
+    form->addRow("Analysis interval", interval_combo_);
     form->addRow("Strength", strength_spin_);
     form->addRow("QP", qp_spin_);
     form->addRow("Preset", preset_combo_);
     form->addRow("Scene length", frames_spin_);
     connect(fga_combo_, &QComboBox::currentIndexChanged, this, &VvcTab::mode_changed);
     connect(preset_combo_, &QComboBox::currentIndexChanged, this, &VvcTab::settings_changed);
+    connect(interval_combo_, &QComboBox::currentIndexChanged, this, &VvcTab::settings_changed);
     connect(strength_spin_, &QSpinBox::valueChanged, this, &VvcTab::settings_changed);
     connect(qp_spin_, &QDoubleSpinBox::valueChanged, this, &VvcTab::settings_changed);
     connect(frames_spin_, &QSpinBox::valueChanged, this, &VvcTab::settings_changed);
@@ -257,6 +274,7 @@ void VvcTab::restore() {
     strength_spin_->setValue(s.value("vvc/strength", 100).toInt());
     qp_spin_->setValue(s.value("vvc/qp", 28).toDouble());
     preset_combo_->setCurrentText(s.value("vvc/preset", "faster").toString());
+    interval_combo_->setCurrentIndex(std::max(0, interval_combo_->findData(s.value("vvc/fga_interval_log2", -1).toInt())));
     frames_spin_->setValue(s.value("vvc/frames", 33).toInt());
     crop_check_->setChecked(s.value("vvc/crop", true).toBool());
     set_offset(s.value("vvc/encode_offset", 0).toInt());
@@ -277,6 +295,7 @@ void VvcTab::save() {
     s.setValue("vvc/strength", strength_spin_->value());
     s.setValue("vvc/qp", qp_spin_->value());
     s.setValue("vvc/preset", preset_combo_->currentText());
+    s.setValue("vvc/fga_interval_log2", interval_combo_->currentData());
     s.setValue("vvc/frames", frames_spin_->value());
     s.setValue("vvc/crop", crop_check_->isChecked());
     s.setValue("vvc/encode", encode_edit_->text());
@@ -292,7 +311,8 @@ void VvcTab::save() {
 
 VvcSettings VvcTab::current_settings() const {
     return VvcSettings{selected_fga(),
-                       VvcCoding{strength_spin_->value(), qp_spin_->value(), preset_combo_->currentText().toStdString()},
+                       VvcCoding{strength_spin_->value(), qp_spin_->value(), preset_combo_->currentText().toStdString(),
+                                 interval_combo_->currentData().toInt()},
                        frames_spin_->value()};
 }
 
@@ -441,7 +461,7 @@ void VvcTab::mode_changed() {
     }
 }
 
-// Inside the encoded scene, new strength, QP or preset encode its three
+// Inside the encoded scene, new strength, interval, QP or preset encode its three
 // modes again. Outside it nothing is encoded, and a new scene length waits
 // for Encode this scene: it decides which frames the next scene holds.
 void VvcTab::apply_settings() {
@@ -869,7 +889,9 @@ QString frame_text(const Clip& clip, std::int64_t index, const FrameStats& stats
            "Scene: frames " + qstring(with_thousands(clip.start)) + "–" +
            qstring(with_thousands(clip.start + clip.count - 1)) + ", " + QString::number(n_sets) + " parameter set" +
            (n_sets != 1 ? "s" : "") + "; --fga " + QString::number(s.fga) + ", " + QString::number(s.coding.strength) +
-           " %, QP " + QString::asprintf("%g", s.coding.qp) + ", " + qstring(s.coding.preset) + "; " +
+           " %, QP " + QString::asprintf("%g", s.coding.qp) + ", " + qstring(s.coding.preset) +
+           (s.coding.interval_log2 >= 0 ? ", analysed " + every_frames(s.coding.interval_log2) : QString()) +
+           "; " +
            qstring(with_thousands(std::llround(clip.kbps()))) + " kb/s, encoded in " +
            QString::number(clip.encode_seconds, 'f', 1) + " s.";
 }

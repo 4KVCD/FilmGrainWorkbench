@@ -449,6 +449,13 @@ std::string vvenc_strength(int percent) {
     return decimal_text(static_cast<double>(steps) / steps_per_unit);  // exact in binary, so exact in decimal
 }
 
+std::vector<std::string> vvenc_interval_args(const VvcCoding& coding) {
+    if (coding.interval_log2 < 0) {
+        return {};
+    }
+    return {"--fgaintervallog2", std::to_string(coding.interval_log2)};
+}
+
 std::string vvenc_hdr_mode(const VideoInfo& info) {
     const bool wide = info.primaries.starts_with("bt2020");
     if (info.transfer == "smpte2084") {
@@ -529,6 +536,9 @@ Clip encode_scene(const VvcTools& tools, const SceneCut& cut, const VvcSettings&
                                            format("%g", settings.coding.qp), "--preset", settings.coding.preset,
                                            "--fga", std::to_string(settings.fga), "--fgastrength",
                                            vvenc_strength(settings.coding.strength)};
+        for (std::string& arg : vvenc_interval_args(settings.coding)) {
+            encode.push_back(std::move(arg));
+        }
         if (cut.hdr != "off") {
             encode.insert(encode.end(), {"--hdr", cut.hdr});
         }

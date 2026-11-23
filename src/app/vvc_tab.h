@@ -208,6 +208,7 @@ private:
     QSpinBox* strength_spin_ = nullptr;
     QDoubleSpinBox* qp_spin_ = nullptr;
     QComboBox* preset_combo_ = nullptr;
+    QComboBox* interval_combo_ = nullptr;  // --fgaintervallog2 as data: -1 (VVenC's default) or log2 of the frames
     QSpinBox* frames_spin_ = nullptr;
     QPushButton* encode_button_ = nullptr;
     QLabel* scene_label_ = nullptr;

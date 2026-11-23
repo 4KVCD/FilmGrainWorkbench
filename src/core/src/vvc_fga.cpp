@@ -163,28 +163,36 @@ FgaSegments read_fga_segments(std::span<const std::uint8_t> stream) {
 std::vector<std::string> vvenc_coding_args(const VvcCoding& coding, const VideoInfo& source) {
     std::vector<std::string> args = {"--qp", format("%g", coding.qp), "--preset", coding.preset, "--fgastrength",
                                      vvenc_strength(coding.strength)};
+    for (std::string& arg : vvenc_interval_args(coding)) {
+        args.push_back(std::move(arg));
+    }
     if (const std::string hdr = vvenc_hdr_mode(source); hdr != "off") {
         args.insert(args.end(), {"--hdr", hdr});
     }
     return args;
 }
 
-bool is_analysis_owned_vvenc_option(std::string_view arg) {
-    // vvencapp's names for them, short and long, in its easy and full option sets (VVEncAppCfg.h); it takes
-    // "--name=value" too. -b is left out: the bit rate in one set, the output in the other.
-    static constexpr std::string_view owned[] = {
-        "i", "input", "inputfile", "o", "output", "bitstreamfile", "reconfile", "s", "size", "sourcewidth",
-        "sourceheight", "c", "format", "inputbitdepth", "inputchromaformat", "internal-bitdepth", "internalbitdepth",
-        "r", "framerate", "framescale", "fps", "f", "frames", "framestobeencoded", "frameskip", "y4m", "segment",
-        "fga", "fgastacked"};
+std::string vvenc_option_name(std::string_view arg) {
     if (!arg.starts_with('-')) {
-        return false;
+        return {};
     }
     arg.remove_prefix(arg.starts_with("--") ? 2 : 1);
     arg = arg.substr(0, arg.find('='));
     std::string name(arg);
     std::transform(name.begin(), name.end(), name.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    return std::find(std::begin(owned), std::end(owned), name) != std::end(owned);
+    return name;
+}
+
+bool is_analysis_owned_vvenc_option(std::string_view arg) {
+    // vvencapp's names for them, short and long, in its easy and full option sets (VVEncAppCfg.h).
+    // -b is left out: the bit rate in one set, the output in the other.
+    static constexpr std::string_view owned[] = {
+        "i", "input", "inputfile", "o", "output", "bitstreamfile", "reconfile", "s", "size", "sourcewidth",
+        "sourceheight", "c", "format", "inputbitdepth", "inputchromaformat", "internal-bitdepth", "internalbitdepth",
+        "r", "framerate", "framescale", "fps", "f", "frames", "framestobeencoded", "frameskip", "y4m", "segment",
+        "fga", "fgastacked"};
+    const std::string name = vvenc_option_name(arg);
+    return !name.empty() && std::find(std::begin(owned), std::end(owned), name) != std::end(owned);
 }
 
 FgaAnalysis analyse_film_grain(const Tools& tools, const VvcTools& vvc_tools, const VideoInfo& source,

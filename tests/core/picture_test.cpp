@@ -148,6 +148,16 @@ TEST(VvcFga, KnowsTheOptionsTheAnalysisSets) {
     }
 }
 
+// VVenC's default interval adds no option, so default commands (and the analyses kept for them) stay as they were.
+TEST(VvcFga, PassesTheAnalysisInterval) {
+    VvcCoding coding;
+    EXPECT_TRUE(vvenc_interval_args(coding).empty());
+    coding.interval_log2 = 2;
+    EXPECT_EQ(vvenc_interval_args(coding), (std::vector<std::string>{"--fgaintervallog2", "2"}));
+    EXPECT_EQ(vvenc_option_name("--FGAIntervalLog2=3"), "fgaintervallog2");
+    EXPECT_EQ(vvenc_option_name("3"), "");
+}
+
 // The encode's own film grain messages go, its other messages stay; an end of sequence is seen.
 TEST(VvcFga, ReplacesTheEncodesMessages) {
     const auto packet_of = [](const std::vector<std::vector<std::uint8_t>>& nals) {

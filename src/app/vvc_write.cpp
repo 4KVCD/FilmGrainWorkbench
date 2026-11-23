@@ -53,6 +53,9 @@ std::string analysis_key(const VideoInfo& source, const VideoInfo& encoded, std:
     const auto [first, last] = frame_range(encoded, source, offset);
     key += std::to_string(offset) + "|" + std::to_string(first) + "|" + std::to_string(last) + "|" +
            format("%g", coding.qp) + "|" + coding.preset + "|" + std::to_string(coding.strength);
+    if (coding.interval_log2 >= 0) {  // only then: the analyses kept before the interval existed stay valid
+        key += "|interval " + std::to_string(coding.interval_log2);
+    }
     if (crop) {
         key += format("|%d,%d,%d,%d", crop->width, crop->height, crop->x, crop->y);
     }

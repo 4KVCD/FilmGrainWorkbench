@@ -49,6 +49,9 @@ struct VvcCoding {
     int strength = 100;  // --fgastrength, percent of the analysed grain
     double qp = 28.0;
     std::string preset = "faster";
+    // --fgaintervallog2: the film grain analysis also runs on every (1 << n)-th picture of a GOP, which 1 << n
+    // must divide; -1, VVenC's default, analyses the GOP's first picture only.
+    int interval_log2 = -1;
     bool operator==(const VvcCoding&) const = default;
 };
 
@@ -167,6 +170,10 @@ std::optional<Rational> vvenc_frame_rate(const Rational& fps);
 // takes a factor and keeps it in steps of 1/64 up to 255/64 (3.98), so the
 // nearest step is given, written exactly: 100 -> "1", 33 -> "0.328125".
 std::string vvenc_strength(int percent);
+
+// vvencapp's options for `coding`'s analysis interval: none for VVenC's
+// default, so a default command stays as it was.
+std::vector<std::string> vvenc_interval_args(const VvcCoding& coding);
 
 // vvencapp --hdr for the source: an HDR encode adapts its QPs to PQ or HLG.
 std::string vvenc_hdr_mode(const VideoInfo& info);

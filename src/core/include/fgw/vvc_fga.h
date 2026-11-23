@@ -61,10 +61,14 @@ struct FgaAnalysis {
     FgaSegments segments;
 };
 
-// The vvencapp options of the window's analysis: `coding`'s QP, preset and
-// strength (the QP sets how much the analysis's filter smooths, as in an
-// encode at that QP) and --hdr from the source's colour tags.
+// The vvencapp options of the window's analysis: `coding`'s QP, preset,
+// strength and analysis interval (the QP sets how much the analysis's filter
+// smooths, as in an encode at that QP) and --hdr from the source's colour tags.
 std::vector<std::string> vvenc_coding_args(const VvcCoding& coding, const VideoInfo& source);
+
+// The vvencapp option the command-line word `arg` names, as vvencapp matches
+// it: "--frames=20" and "-F" give "frames" and "f"; empty for a value.
+std::string vvenc_option_name(std::string_view arg);
 
 // Whether the command-line word `arg` ("-f", "--frames=20", "--FrameRate")
 // is a vvencapp option analyse_film_grain sets itself: the input and output,

@@ -38,20 +38,24 @@ constexpr const char* usage = R"(fga-inject: rerun VVenC's film grain analysis o
 replace its film grain (FGC SEI) messages, without encoding.
 
   fga-inject --encode E.mkv --source S [--source-frame N | --source-start SEC]
-             --fga 2|3|2,3 --vvencapp X.exe --out O.mkv [--dump model.jsonl]
-             -- <the vvencapp options the encode was made with>
+             --fga 2|3|2,3 [--fga-interval auto|N] --vvencapp X.exe --out O.mkv
+             [--dump model.jsonl] -- <the vvencapp options the encode was made with>
 
   --encode        the VVC encode: MKV or MP4 (a raw .266 has no vvcC record to write from)
   --source        what it was encoded from: any file FFmpeg reads
   --source-frame  the source frame the encode's first frame shows (default 0)
   --source-start  the same in seconds: the first source frame at or after it
   --fga           the mode(s) written; one analysis serves both
+  --fga-interval  how often the grain is analysed: auto (VVenC's default, the first frame of
+                  each GOP and scene cut) or every N frames, N = 1, 2, 4, 8, 16, 32 or 64
+                  dividing the GOP size (vvencapp --fgaintervallog2)
   --vvencapp      a vvencapp with --fga 4 and --fgastacked (vvc\build_fga_tool_vvencapp.ps1)
   --out           the output MKV; with two modes, O_fga2.mkv and O_fga3.mkv
   --dump          one JSON line per mode and frame: the parameter set written
-  after --         the encode's own options (QP, preset, refresh period, --hdr or --sdr,
+  after --        the encode's own options (QP, preset, refresh period, --hdr or --sdr,
                   threads...), without input, output, size, format, frame rate or
-                  count and --fga: the tool sets those from the encode.
+                  count and --fga: the tool sets those from the encode; the analysis
+                  interval goes in --fga-interval.
 
 The source is decoded into a pipe at the encode's bit depth (4:2:0), converted
 as an `ffmpeg -pix_fmt` pipe converts it (scaled with spline only when its size
@@ -84,8 +88,22 @@ std::vector<int> parse_modes(const std::string& text) {
     throw UsageError("--fga takes 2, 3 or 2,3 (the fitted modes), not " + text);
 }
 
+// --fga-interval's value as vvencapp's --fgaintervallog2: auto -1, N frames log2(N).
+int parse_interval(const std::string& text) {
+    if (text == "auto") {
+        return -1;
+    }
+    for (int log2 = 0; log2 <= 6; ++log2) {  // VVenC takes 0 to 6
+        if (text == std::to_string(1 << log2)) {
+            return log2;
+        }
+    }
+    throw UsageError("--fga-interval takes auto or 1, 2, 4, 8, 16, 32 or 64 frames, not " + text);
+}
+
 Options parse(const std::vector<std::string>& args) {
     Options options;
+    VvcCoding interval;  // only its analysis interval (--fga-interval) is used
     std::size_t i = 0;
     const auto value = [&](const std::string& name) -> const std::string& {
         if (++i >= args.size()) {
@@ -117,6 +135,7 @@ Options parse(const std::vector<std::string>& args) {
         else if (arg == "--source-frame") options.source_frame = number(arg, [](const std::string& s, std::size_t* used) { return std::stoll(s, used); });
         else if (arg == "--source-start") options.source_start = number(arg, [](const std::string& s, std::size_t* used) { return std::stod(s, used); });
         else if (arg == "--fga") options.modes = parse_modes(value(arg));
+        else if (arg == "--fga-interval") interval.interval_log2 = parse_interval(value(arg));
         else if (arg == "--vvencapp") options.vvencapp = value(arg);
         else if (arg == "--out") options.out = utf8_path(value(arg));
         else if (arg == "--dump") options.dump = utf8_path(value(arg));
@@ -131,9 +150,15 @@ Options parse(const std::vector<std::string>& args) {
         throw UsageError("give --source-frame or --source-start, not both");
     }
     for (const std::string& arg : options.vvenc_args) {
+        if (vvenc_option_name(arg) == "fgaintervallog2") {
+            throw UsageError("give the analysis interval as --fga-interval, before --");
+        }
         if (is_analysis_owned_vvenc_option(arg)) {
             throw UsageError("the tool sets " + arg + " itself from the encode: leave it out of the options after --");
         }
+    }
+    for (std::string& arg : vvenc_interval_args(interval)) {
+        options.vvenc_args.push_back(std::move(arg));
     }
     return options;
 }
