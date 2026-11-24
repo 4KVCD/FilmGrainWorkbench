@@ -1,17 +1,15 @@
 # Builds vvencapp and vvdecapp for the VVC grain analyzer and copies them to ..\bin.
 #
-# VVenC: commit 1eb07fe0, master of the 4KVCD fork: fraunhoferhhi/vvenc master
-#        a455d51e (--fga 1 to 3, pull requests 764 and 765) with the 4KVCD pull
-#        requests not merged yet, among them the film grain analysis fixes (every
-#        shot analysed inside the shot, no grain on clipped highlights, black bars
-#        or clipped blacks; for --fga 2 and 3 no coarse grain on fast motion, more
-#        grain on Blu-ray sources whose grain repeats, grain on bright areas with no
-#        flat blocks, --fga 3's filter coefficients in [-128, 127] so FFmpeg decodes
-#        the streams, and the fit of each picture's grain to the grain its coding
-#        lost); plus vvenc-fga-analysis-only.patch (this folder): --fga 4, the three
-#        modes' analyses without coding, for adding the grain to an encode made
-#        elsewhere. --fga 4 codes nothing, so its grain is the analyzers' own, not
-#        fitted to any coding's loss. -VvencSource takes another clone holding them.
+# VVenC: commit e7752df0, branch fga-workbench of the 4KVCD fork: the fork's
+#        master 52ed0ed3 (fraunhoferhhi/vvenc master with the 4KVCD pull requests
+#        not merged yet, among them the film grain analysis fixes,
+#        --fgaintervallog2 and pull request 1025, the lost-grain fit weighted as
+#        the eye sees it: at most 1.05x the lost grain, pooled over the 8 nearest
+#        pictures) plus --fga 4: the three modes' analyses without coding, for
+#        adding the grain to an encode made elsewhere; with --fgastacked, modes 2
+#        and 3 are fitted to the grain that encode lost. -VvencSource takes
+#        another clone holding them; -VvencLocalPatch a patch file of this folder
+#        to apply.
 # vvdec: fraunhoferhhi/vvdec master (with its film grain fixes, pull requests 414
 #        and 449), plus pull request 450 (film grain for 4:2:2, 4:4:4 and 4:0:0;
 #        4:2:0 unchanged), not merged yet.
@@ -19,11 +17,11 @@
 param(
     [string]$WorkDir = (Join-Path $env:LOCALAPPDATA "afgs1wb-vvc-build"),
     [string]$VvencSource = "https://github.com/4KVCD/vvenc.git",
-    [string]$VvencBranch = "master",
-    [string]$VvencRef = "1eb07fe0",    # the fork's master (2026-11-15)
+    [string]$VvencBranch = "fga-workbench",
+    [string]$VvencRef = "e7752df0",    # fga-workbench (2026-11-24)
     [string]$VvdecRef = "6f6bb29",     # vvdec master (2026-10-20)
     [string]$VvdecPatch = "428097930", # pull request 450's own commit (its first is 449, in master)
-    [string]$VvencLocalPatch = "vvenc-fga-analysis-only.patch"
+    [string]$VvencLocalPatch = ""      # none: the commit has --fga 4
 )
 # Not $ErrorActionPreference = "Stop": Windows PowerShell turns any line a program
 # writes to stderr (CMake's warnings) into an error. Exit codes are checked instead.
@@ -38,6 +36,7 @@ function Check($what) {
 # (from `patch_fetch`) and the patch files `local_patches` (in this folder) to
 # the working tree without committing, and builds `target`.
 function Build($name, $url, $fetch, $ref, $target, $patch_fetch = $null, $patches = @(), $local_patches = @()) {
+    $local_patches = @($local_patches | Where-Object { $_ })  # an empty name: no patch file
     $src = Join-Path $WorkDir $name
     if (-not (Test-Path $src)) { git clone -q $url $src; Check "git clone $url" }
     git -C $src fetch -q $url $fetch; Check "git fetch $fetch from $url"

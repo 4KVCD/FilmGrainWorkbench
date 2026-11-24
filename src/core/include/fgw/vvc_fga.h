@@ -1,6 +1,6 @@
 // VVenC's film grain analysis added to a VVC encode made elsewhere.
 //
-// The app's VVenC (vvc/vvenc-fga-analysis-only.patch) analyses the source
+// The app's VVenC (vvc/build_vvc_tools.ps1) analyses the source
 // with --fga 4: the analyses of --fga 1, 2 and 3 on the same pictures,
 // without coding them. Its output holds, after each analysis, each mode's
 // parameter set as an H.274 film grain characteristics (FGC) SEI payload and
